@@ -12,16 +12,45 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from config.settings import OUTPUT_DIR
+from config.settings import OUTPUT_DIR, EASTERN
 from config.sports import market_kind
 from data.games import match_game
 from signals.recommendation import Recommendation
 
 log = logging.getLogger("engine.paper")
+
+_MONTHS = {m: i for i, m in enumerate(
+    ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"], start=1)}
+# MLB winner/total tickers embed the ET first pitch as <YY><MON><DD><HH><MM> right after
+# the series prefix. That is Kalshi-authoritative and reliable; occurrence_datetime is NOT
+# -- on 2026-09-01 NYM@TB and SEA@BOS were stamped 01:40Z/01:45Z (9:40/9:45pm ET) for games
+# whose real first pitch was 22:40Z/22:45Z (6:40/6:45pm ET, MLB Stats API confirmed), a whole
+# 3-hour skew that pushed both games out of the trigger window and silently killed their
+# paper bets. NFL tickers carry no time-of-day segment, so they still fall back to
+# occurrence_datetime (there is no ticker time to prefer).
+_MLB_TICKER_TIME_RE = re.compile(r"^KXMLB(?:GAME|TOTAL)-(\d{2})([A-Z]{3})(\d{2})(\d{2})(\d{2})")
+
+
+def first_pitch_from_ticker(ticker: str) -> Optional[datetime]:
+    """UTC first pitch parsed from an MLB ticker's embedded ET time, or None when the
+    ticker carries no time-of-day segment (e.g. NFL) or can't be parsed."""
+    m = _MLB_TICKER_TIME_RE.match(ticker or "")
+    if not m:
+        return None
+    yy, mon, dd, hh, mm = m.groups()
+    month = _MONTHS.get(mon)
+    if not month:
+        return None
+    try:
+        naive_et = datetime(2000 + int(yy), month, int(dd), int(hh), int(mm))
+    except ValueError:
+        return None
+    return naive_et.replace(tzinfo=EASTERN).astimezone(timezone.utc)
 
 
 class PaperLedger:
@@ -64,7 +93,18 @@ def run_paper_trigger(recs: list[Recommendation], clients: dict, ledger: PaperLe
     placed: list[dict] = []
     for r in recs:
         event_key = r.ticker.rsplit("-", 1)[0]
-        fp = r.game_datetime
+        # First pitch: prefer the MLB ticker's embedded ET time (Kalshi-authoritative)
+        # over occurrence_datetime, which has been observed mis-stamped by whole hours and
+        # would silently push a game out of the trigger window. NFL tickers have no embedded
+        # time, so first_pitch_from_ticker() returns None and we fall back to occurrence.
+        ticker_fp = first_pitch_from_ticker(r.ticker)
+        fp = ticker_fp or r.game_datetime
+        if ticker_fp is not None and r.game_datetime is not None:
+            skew_min = abs((ticker_fp - r.game_datetime).total_seconds()) / 60.0
+            if skew_min > 30:
+                log.warning("paper-trigger: %s occurrence_datetime %s disagrees with ticker "
+                            "first pitch %s by %.0f min; trusting the ticker.",
+                            r.ticker, r.game_datetime.isoformat(), ticker_fp.isoformat(), skew_min)
         minutes = (fp - now).total_seconds() / 60.0 if fp is not None else None
         # "In the trigger window" = game starts within window_minutes (and hasn't yet).
         in_window = minutes is not None and 0 < minutes <= window_minutes

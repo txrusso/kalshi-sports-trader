@@ -1,0 +1,104 @@
+=== BASELINE captured 20260831 ===
+
+--- bankroll_sim (cached, current production params) ---
+TRAIN: n=206 win_rate=0.476 roi_on_staked=-0.0301 bankroll=$16.15 (-19.2%) brier=0.2513 maxDD=43.19%
+  by_kind: winner n=97 wr=0.464 roi=-0.1464 | total n=109 wr=0.486 roi=0.0838
+VALID: n=329 win_rate=0.535 roi_on_staked=0.0977 bankroll=$83.65 (+318.2%) brier=0.2457 maxDD=31.82%
+  by_kind: winner n=160 wr=0.575 roi=0.0783 | total n=169 wr=0.497 roi=0.1161
+
+(season_backtest calibration table appended separately)
+
+--- season_backtest TOTALS calibration (leak-safe, n=10436) ---
+ 0-10%  n=630   mean_pred=0.056  actual_rate=0.356   <-- THE DEFECT: says 5.6%, real 35.6%
+10-20%  n=1259  mean_pred=0.154  actual_rate=0.249   <-- says 15.4%, real 24.9%
+20-30%  n=1300  mean_pred=0.249  actual_rate=0.285
+30-40%  n=1128  mean_pred=0.349  actual_rate=0.344   (well-calibrated from here down)
+40-50%  n=953   mean_pred=0.45   actual_rate=0.438
+50-60%  n=886   mean_pred=0.55   actual_rate=0.549
+60-70%  n=893   mean_pred=0.65   actual_rate=0.624
+70-80%  n=944   mean_pred=0.75   actual_rate=0.745
+80-90%  n=1188  mean_pred=0.852  actual_rate=0.841
+90-100% n=1255  mean_pred=0.941  actual_rate=0.943
+  totals brier=0.1955  acc=0.717
+  season ROI pass (5.5c gate, flat $1): winner roi=0.0749 (261 bets), totals roi=0.0649 (282 bets)
+
+--- money-flow per-component IC (evaluate.py, n=2085 graded markets) ---
+signal_ic (blended 0.40/0.35/0.25) = 0.488
+  ic_book   = 0.545   (40% weight -- the workhorse)
+  ic_trades = 0.286   (35% weight)
+  ic_oi     = 0.090   (25% weight -- NEAR NOISE; inert on 1013/2085 markets)
+weight sweep (in-sample signal_ic only, NOT roi):
+  drop OI 0.55/0.45/0    = 0.500
+  book-heavy 0.60/0.30/0.10 = 0.528
+  book-only 1.0/0/0      = 0.545
+CAVEAT: book IC at latest snapshot partly re-reads the market price (favorite bias).
+IC diagnoses OI as weak; it does NOT license a re-weight -- that needs the ROI replay harness.
+
+============================================================
+WEATHER EXPERIMENT (Priority 1) -- BUILT, WALK-FORWARD TESTED, REVERTED
+============================================================
+Hypothesis (from CLAUDE.md): the totals 0-10% low-bucket miscalibration
+(pred ~5.6% over, actual ~36%) is driven by missing weather (wind-out days, esp Wrigley).
+
+Mechanism built: schedule `weather` hydrate -> parse wind(out/in x mph)+temp ->
+weather_factor() multiplier on lam. Sweepable coef, cache rebuilt WITH weather
+(1717 games, 100% temp, 900 directional wind).
+
+WIND coef sweep -- TOTALS-only flat-$1, fresh weather cache:
+  coef   TRAIN brier / roi        VALID brier / roi
+  0.000  0.2492 / +0.020          0.2465 / +0.0925   <- BEST validate brier & roi
+  0.002  0.2490 / -0.001          0.2466 / +0.068
+  0.004  0.2489 / +0.030          0.2468 / -0.019
+  0.006  0.2491 / +0.073          0.2471 / +0.044
+  0.008  0.2495 / +0.028          0.2477 / +0.012
+  0.010  0.2499 / -0.009          0.2481 / +0.044
+  => validate Brier MONOTONICALLY WORSENS with the wind coef (overfit signature).
+
+TEMP coef sweep -- bankroll_sim VALID totals roi / maxDD:
+  0.000  roi +0.0775 / DD 31.8%
+  0.001  roi +0.0515 / DD 37.4%
+  0.002  roi -0.0184 / DD 46.5%
+  0.003  roi -0.0110 / DD 54.5%
+  => temperature strictly degrades ROI and inflates drawdown.
+
+Low-bucket calibration at wind coef 0.006 (all 10,436 lines, leak-safe):
+  0-10% n=597 pred=0.055 actual=0.36   (baseline: n=630 pred=0.056 actual=0.356)
+  => the low bucket BARELY MOVED. A bounded wind factor shifts lam ~9-12% for windy
+     games -- far too small to close a 5.6%->36% far-tail gap.
+
+VERDICT: hypothesis DISPROVEN. Weather is real but far too small to be the lever.
+The low-bucket defect is a right-TAIL-SHAPE problem (NB right tail too thin at high
+lines), not a weather problem. Reverted, same as the Pythagorean/recency overfits.
+Recommended next investigation: an asymmetric / heavier-right-tail count model for
+totals, validated the same walk-forward way (must not break the well-calibrated
+30-100% buckets). NOT a symmetric phi bump (that breaks the 90-100% bucket).
+
+============================================================
+TOTALS RIGHT-TAIL FIX (2026-09-01) -- BUILT, VALIDATED, REVERTED
+============================================================
+Hypothesis: the 0-10% bucket miscalibration (pred 5.6%, actual ~36%) is a too-thin NB
+right tail -> fix with a heavier-right-tail count model.
+
+Built: a MEAN-PRESERVING blowout mixture on nb_survival (fatten right tail, thin the base,
+keep E[N]=lam so the well-calibrated center/high buckets don't move). Sweepable
+(blow_weight, blow_mult) in bankroll_sim + season_backtest; identity at weight 0.
+
+CALIBRATION (season_backtest, all lines, train<=2026-07-15 / validate, blow 0.10/2.0):
+  validate Brier 0.1955 -> 0.1942 (better), high-half(>=50%) Brier 0.165 -> 0.159 (better).
+  => a clean, real calibration improvement that does NOT break the calibrated buckets.
+
+MONEY -- deep-tail ROI test (THE decisive one; real pregame prices on all baseline
+P(over)<0.25 lines, 2586 lines priced, production 5.5c gate):
+  strategy        split      n    win%     roi   (over/under)
+  baseline        validate  306   0.647  -0.012  (42/264)
+  blow 0.10/2.0   validate  256   0.566  -0.062  (52/204)   <- WORSE
+  blow 0.15/2.0   validate  239   0.498  -0.072  (74/165)   <- WORSE
+  baseline        train     188   0.702  -0.026
+  blow 0.10/2.0   train     148   0.655  -0.049              <- WORSE
+  => the fix shifts bets under->over as designed, but ROI gets WORSE on BOTH splits.
+
+VERDICT: reverted. The high-line miscalibration is REAL but NOT EXPLOITABLE -- the market
+prices those high-scoring games correctly, so moving the model toward reality just moves it
+toward the market's prices (calibration up, profit down; same lesson as the Pythagorean
+blend). Baseline deep-tail bets already lose slightly (-1.2%); the fix loses more. There is
+no free edge in the totals tail.

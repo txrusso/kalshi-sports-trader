@@ -1,0 +1,15 @@
+# NEVER commit secrets
+Kal_API.txt
+notify_config.txt
+*.pem
+.env
+
+# venv + caches
+.venv/
+__pycache__/
+*.pyc
+
+# generated data / outputs
+logs/
+snapshots/
+output/

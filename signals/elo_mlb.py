@@ -17,10 +17,20 @@ used by data/fair_value.py's log5 home-field step (HOME_FIELD_ODDS_MULT = 0.54/0
 so an Elo-vs-log5 comparison isn't confounded by two independently-fit home-field
 numbers -- it isolates the win-probability *input* (record vs rating), not home field.
 
-K_FACTOR is seeded low relative to NFL's 20: MLB teams play ~10x as many games per
-season, so each individual game should move a team's rating much less. Not yet
-validated against this project's own data (same caveat elo_nfl.py carries for its own
-constants) -- bankroll_sim.py's --sweep can test it directly.
+K_FACTOR=3.5, walk-forward validated 2026-09-02 (`backtest/bankroll_sim.py --sweep
+elo_k_factor ...`, train <=2026-07-15 / validate after; EloRatings rebuilt per swept
+value since K_FACTOR shapes the whole chronological rating build, not a per-row
+parameter). Originally seeded at 6.0 by analogy to elo_nfl.py's 20 (MLB teams play
+~10x as many games/season, so each individual game should move a rating less) but
+never actually tested against this project's data until this sweep. The sweep (2.0
+to 20.0, then fine-swept 3.0-5.5) found a flat plateau at 3.2-3.8 that clearly beats
+6.0 on BOTH splits and every metric: TRAIN winner ROI -0.154->-0.099, TRAIN winner
+win_rate 0.470->0.494, TRAIN max drawdown 42.2%->32.6%; VALID winner ROI 0.0995->
+0.127 (now essentially matching totals' VALID ROI of ~0.119), VALID winner win_rate
+0.589->0.597, VALID max drawdown roughly flat (23.8%->23.9%). Landed at 3.5 (plateau
+midpoint, not the single-point peak of 3.4) per this project's standing discipline
+against chasing knife-edge sweep peaks. Same one-partial-season caveat as every other
+constant here -- re-sweep as more settled markets accumulate.
 """
 from __future__ import annotations
 
@@ -28,7 +38,7 @@ import math
 from collections import defaultdict
 
 INITIAL_RATING = 1500.0
-K_FACTOR = 6.0
+K_FACTOR = 3.5
 HOME_FIELD_ELO = 400.0 * math.log10(0.54 / 0.46)   # ~28.0
 SEASON_REGRESSION = 1.0 / 3.0
 
@@ -44,10 +54,12 @@ def _normalize(abbr: str) -> str:
     return _TEAM_ALIASES.get(abbr, abbr)
 
 
-def win_prob(rating_a: float, rating_b: float, a_is_home: bool) -> float:
+def win_prob(rating_a: float, rating_b: float, a_is_home: bool,
+             home_field_elo: float = None) -> float:
     """P(A wins), folding home field into the pre-logistic Elo diff."""
+    hf = HOME_FIELD_ELO if home_field_elo is None else home_field_elo
     diff = rating_a - rating_b
-    diff += HOME_FIELD_ELO if a_is_home else -HOME_FIELD_ELO
+    diff += hf if a_is_home else -hf
     return 1.0 / (1.0 + 10 ** (-diff / 400.0))
 
 
@@ -66,10 +78,21 @@ class EloRatings:
     rating_before() only uses games strictly before the query date.
     """
 
-    def __init__(self, games: list[dict]):
+    def __init__(self, games: list[dict], k_factor: float = None, home_field_elo: float = None):
         self._games = sorted(games, key=lambda g: g["date_str"])
         self._history: dict[str, list[tuple]] = {}
         self._built = False
+        # Overridable so backtest/bankroll_sim.py can sweep K_FACTOR (rebuilding ratings
+        # per value) -- this is how the module constant above was walk-forward validated
+        # to 3.5; see this module's docstring for the sweep.
+        self._k_factor = K_FACTOR if k_factor is None else k_factor
+        # Same idea for the home-field boost: HOME_FIELD_ELO was originally DERIVED to
+        # match log5's fixed 0.54/0.46 home-win assumption purely so an early Elo-vs-log5
+        # comparison wasn't confounded by two independently-fit home-field numbers (see
+        # module docstring) -- back when Elo wasn't wired into production at all. Now that
+        # it's blended into fair value at real weight, that constraint no longer has to
+        # hold; exposed here so it can be swept on its own, same pattern as k_factor.
+        self.home_field_elo = HOME_FIELD_ELO if home_field_elo is None else home_field_elo
 
     def _build(self) -> None:
         if self._built:
@@ -95,11 +118,11 @@ class EloRatings:
             r_away = entering(away, season)
             r_home = entering(home, season)
             margin = g["home_score"] - g["away_score"]
-            p_home = win_prob(r_home, r_away, a_is_home=True)
+            p_home = win_prob(r_home, r_away, a_is_home=True, home_field_elo=self.home_field_elo)
             actual_home = 1.0 if margin > 0 else (0.0 if margin < 0 else 0.5)
-            elo_diff_winner = ((r_home - r_away + HOME_FIELD_ELO) if margin >= 0
-                              else (r_away - r_home - HOME_FIELD_ELO))
-            delta = K_FACTOR * _mov_multiplier(margin, elo_diff_winner) * (actual_home - p_home)
+            elo_diff_winner = ((r_home - r_away + self.home_field_elo) if margin >= 0
+                              else (r_away - r_home - self.home_field_elo))
+            delta = self._k_factor * _mov_multiplier(margin, elo_diff_winner) * (actual_home - p_home)
             r_home_after, r_away_after = r_home + delta, r_away - delta
             hist[home].append((date_str, season, r_home, r_home_after))
             hist[away].append((date_str, season, r_away, r_away_after))

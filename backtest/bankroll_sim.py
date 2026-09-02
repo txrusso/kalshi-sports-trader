@@ -48,7 +48,7 @@ from backtest.season_backtest import (
     SeasonLedger, PitcherLogs, fetch_settled_markets, fetch_entry_price, KALSHI_DATA_START,
     GAME_UTC_OFFSET_HOURS, PREGAME_BUFFER_MIN, _shift,
 )
-from data.fair_value import parse_ticker, log5, _apply_home_field, _regress_win_pct, WINNER_REGRESS
+from data.fair_value import parse_ticker, log5, _apply_home_field, _regress_win_pct, WINNER_REGRESS, ELO_WEIGHT
 from data.fair_value_totals import parse_total_ticker, park_factor, SP_WEIGHT, PITCHER_REG_IP, LEAGUE_SHRINK, TOTALS_PHI
 from data.mlb_stats import RECENT_WINDOW_GAMES, fetch_historical_games
 from kalshi.client import KalshiClient
@@ -68,7 +68,15 @@ DEFAULT_PARAMS = {
     "totals_phi": TOTALS_PHI, "min_edge": DEFAULTS.min_edge_cents / 100,
     "kelly_fraction": DEFAULTS.kelly_fraction, "max_stake_pct": DEFAULTS.max_stake_pct,
     "winner_regress": WINNER_REGRESS,
-    "elo_weight": 0.0,   # 0 = pure log5 (current production); 1 = pure Elo; blended between
+    "sp_winner_beta": 0.0,   # starting-pitcher matchup weight on the WINNER side (log-odds
+                              # per run-per-9 of starter advantage vs each team's own
+                              # baseline). 0.0 = production: the winner model uses no
+                              # pitcher information at all, unlike the totals model.
+    "elo_weight": ELO_WEIGHT,   # pulled from data/fair_value.py so this stays in sync with
+                                # production (was hardcoded 0.0 / stale "current production"
+                                # comment until 2026-09-02, even after ELO_WEIGHT shipped at
+                                # 0.2 on 2026-09-01 -- the baseline report wasn't actually
+                                # testing production. 0 = pure log5; 1 = pure Elo; blended between.
 }
 
 
@@ -294,7 +302,39 @@ def elo_prob(row, ratings: EloRatings) -> float:
     pt = parse_ticker(row["ticker"])
     r_yes = ratings.rating_before(pt.yes_team, row["date"])
     r_opp = ratings.rating_before(pt.opponent, row["date"])
-    return elo_win_prob(r_yes, r_opp, a_is_home=row["yes_is_home"])
+    return elo_win_prob(r_yes, r_opp, a_is_home=row["yes_is_home"],
+                        home_field_elo=ratings.home_field_elo)
+
+
+def starter_edge_runs(row, ing, p) -> float:
+    """Runs-per-9 advantage the YES team gets from TODAY'S starting-pitcher matchup,
+    measured RELATIVE TO each team's own typical run prevention (so it adds pitcher
+    information without re-litigating team strength, which log5/Elo already cover).
+
+    Each starter's RA9 is regressed toward league average by innings pitched, exactly
+    as data/fair_value_totals.py does (`pitcher_reg_ip`), then compared to that team's
+    season run-prevention rate. A starter better than his team's baseline is a negative
+    adjustment (fewer runs allowed). Positive return = today's matchup favors YES.
+    Returns 0.0 when either starter is unknown (same graceful-degradation path the
+    totals model takes)."""
+    lg_team = ing["lg_team"]
+
+    def sp_vs_baseline(sp_ra9, sp_ip, team_ra_pg):
+        if sp_ra9 is None or sp_ip is None:
+            return None
+        reliab = sp_ip / (sp_ip + p["pitcher_reg_ip"])
+        sp_reg = reliab * sp_ra9 + (1 - reliab) * lg_team
+        return sp_reg - team_ra_pg
+
+    if row["yes_is_home"]:
+        yes_adj = sp_vs_baseline(ing["home_sp_ra9"], ing["home_sp_ip"], ing["home_ra_pg"])
+        opp_adj = sp_vs_baseline(ing["away_sp_ra9"], ing["away_sp_ip"], ing["away_ra_pg"])
+    else:
+        yes_adj = sp_vs_baseline(ing["away_sp_ra9"], ing["away_sp_ip"], ing["away_ra_pg"])
+        opp_adj = sp_vs_baseline(ing["home_sp_ra9"], ing["home_sp_ip"], ing["home_ra_pg"])
+    if yes_adj is None or opp_adj is None:
+        return 0.0
+    return opp_adj - yes_adj
 
 
 def winner_prob(row, ing, p, ratings: EloRatings = None):
@@ -305,9 +345,19 @@ def winner_prob(row, ing, p, ratings: EloRatings = None):
     r = p.get("winner_regress", 0.0)
     log5_p = _apply_hf(_log5(_regress_win_pct(pa, r), _regress_win_pct(pb, r)), row["yes_is_home"])
     w = p.get("elo_weight", 0.0)
-    if w <= 0.0 or ratings is None:
-        return log5_p
-    return (1 - w) * log5_p + w * elo_prob(row, ratings)
+    prob = log5_p if (w <= 0.0 or ratings is None) else \
+        (1 - w) * log5_p + w * elo_prob(row, ratings)
+
+    # Starting-pitcher matchup as a log-odds nudge on top of the team-strength estimate.
+    # 0.0 = production (no pitcher input on the winner side at all).
+    beta = p.get("sp_winner_beta", 0.0)
+    if beta > 0.0:
+        edge_runs = starter_edge_runs(row, ing, p)
+        if edge_runs:
+            odds = prob / (1 - prob) if prob < 1 else 999.0
+            odds *= math.exp(beta * edge_runs)
+            prob = odds / (1 + odds)
+    return prob
 
 
 def totals_prob(row, ing, p):
@@ -434,7 +484,15 @@ def main() -> None:
                 v_typed = float(v)
             except ValueError:
                 v_typed = v
-            report(cache, {param: v_typed}, f"{param}={v_typed}", ratings)
+            # elo_k_factor / elo_home_field rebuild ratings per value (both live inside
+            # EloRatings' chronological build, not simulate()'s per-row params) rather than
+            # being ordinary DEFAULT_PARAMS entries -- see EloRatings.__init__'s overrides.
+            rebuild_params = {"elo_k_factor": "k_factor", "elo_home_field": "home_field_elo"}
+            if param in rebuild_params:
+                sweep_ratings = EloRatings(elo_cache["games"], **{rebuild_params[param]: v_typed})
+                report(cache, {}, f"{param}={v_typed}", sweep_ratings)
+            else:
+                report(cache, {param: v_typed}, f"{param}={v_typed}", ratings)
         return
 
     report(cache, {}, "current production parameters", ratings)

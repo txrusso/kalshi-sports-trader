@@ -50,7 +50,21 @@ class Settings:
     market_status: str = "open"          # only scan open markets
     min_market_volume: int = 50          # ignore illiquid markets (contracts traded)
     min_open_interest: int = 50
-    max_deep_markets: int = 50           # cap markets deep-scanned/cycle (bounds API load)
+    max_deep_markets: int = 100          # cap markets deep-scanned/cycle (bounds API load).
+                                         # Raised 50 -> 100 on 2026-09-02: with MLB and NFL
+                                         # both live, the 50 cap was being exhausted by rank
+                                         # ~15 of the liquidity-ranked event list, and real
+                                         # qualifying bets were never being evaluated (found
+                                         # live: TOR@CLE Under 8.5 sat at rank 19 with a
+                                         # +9.9c edge and agreeing money flow, unscanned).
+                                         # The squeeze is structural, not incidental: an MLB
+                                         # totals event costs 8-10 slots (one per O/U rung)
+                                         # while an NFL game event costs 2, so cheap NFL
+                                         # events crowd out exactly the expensive MLB totals
+                                         # events that carry most of the realized profit.
+                                         # Deep scan is 2 API calls/market (book + trades),
+                                         # so this doubles per-cycle calls (~100 -> ~200),
+                                         # still far inside a 30-min cycle.
 
     # --- Money-flow signal weights (sum need not be 1; normalized internally) ---
     w_book_imbalance: float = 0.40       # dollar-weighted resting depth skew
@@ -100,7 +114,8 @@ class Settings:
 
     # --- Advisory position sizing (NOT executed) ---
     dynamic_bankroll: bool = True        # pull live account balance as the bankroll each run
-    bankroll_usd: float = 20.0           # fallback stake base if the balance fetch fails
+    bankroll_usd: float = 50.0           # fallback stake base if the balance fetch fails
+                                         # (= total deposited capital: $20 + $30 added 2026-09-01)
     # kelly_fraction was 0.35, max_stake_pct was 0.15 (raised together 2026-08-08 --
     # see CLAUDE.md). Both lowered 2026-08-13 after backtest/bankroll_sim.py's
     # walk-forward sweep: a Kelly-bankroll simulation on real settled markets/prices
@@ -136,10 +151,6 @@ class Settings:
     # --- Order safety caps (used by the guarded `place` preview) ---
     max_order_contracts: int = 200        # hard cap on contracts per order
     max_order_cost_usd: float = 100.0     # hard cap on $ risked per order
-
-    # --- Data source toggles ---
-    use_espn: bool = True
-    use_mlb_stats_api: bool = True
 
     def base_url(self) -> str:
         return KALSHI_DEMO_BASE if self.use_demo else KALSHI_API_BASE

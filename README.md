@@ -151,9 +151,9 @@ signal weights, `min_edge_cents`, `min_confidence`, `max_spread_cents`,
 ```
 config/      credentials loader + settings
 kalshi/      signed API client, request signing, payload normalization
-data/        MLB Stats + ESPN clients, fair-value model
-signals/     money-flow signal, recommendation fusion
-engine/      scan cycle, loop, snapshot store
+data/        MLB Stats + nflverse clients, fair-value models (winner + totals, per sport)
+signals/     money-flow signal, Elo ratings, recommendation fusion, calibration
+engine/      scan cycle, loop, snapshot store, paper ledger, notifications
 output/      console + JSON reporting
 backtest/    outcome resolution + signal evaluation
 tests/       auth smoke test + data-shape explorers

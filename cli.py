@@ -316,9 +316,17 @@ def cmd_settle(args) -> None:
     from engine.paper import PaperLedger
     from backtest.evaluate import _game_date
     from data.games import resolve_outcomes
+    from config.sports import sport_of, market_kind
     bets = PaperLedger().load()
     if args.date:
         bets = [b for b in bets if _game_date(b["ticker"]) == args.date]
+    if getattr(args, "sport", None):
+        want = args.sport.lower()
+        bets = [b for b in bets if sport_of(b["ticker"]) == want]
+        if not bets:
+            print(f"No {want.upper()} bets in the paper ledger"
+                  f"{' for ' + args.date if args.date else ''}.")
+            return
     if not bets:
         print("Paper ledger is empty (run `loop --paper` to accumulate bets).")
         return
@@ -331,6 +339,17 @@ def cmd_settle(args) -> None:
         print(f"{'RESULT':<7}{'BET':<34}{'ENTRY':>6}{'CT':>5}{'NET$':>9}  MARKET")
         print("-" * 82)
         pnl = staked = wins = dollar = 0.0
+        # Per-sport / per-market-kind tallies. MLB and NFL share one account, ledger and
+        # dashboard, but they are two independently-validated models (NFL's has no real
+        # regular-season track record yet -- see CLAUDE.md), so a single blended P&L line
+        # hides which one is actually working. Keyed off config/sports.py, so a third
+        # sport would show up here automatically.
+        tally: dict[str, dict[str, dict]] = {}
+
+        def _bucket(sport: str, kind: str) -> dict:
+            return tally.setdefault(sport, {}).setdefault(
+                kind, {"n": 0, "w": 0, "pnl": 0.0, "staked": 0.0, "dollar": 0.0})
+
         for b in sorted(settled, key=lambda x: x["first_pitch"]):
             yes_won = outcomes[b["ticker"]]
             won = yes_won if b["side"] == "YES" else (not yes_won)
@@ -340,14 +359,46 @@ def cmd_settle(args) -> None:
             pnl += per
             staked += b["entry_price"]
             wins += int(won)
+            st = _bucket(sport_of(b["ticker"]), market_kind(b["ticker"]))
+            st["n"] += 1
+            st["w"] += int(won)
+            st["pnl"] += per
+            st["staked"] += b["entry_price"]
+            st["dollar"] += per * ct
             print(f"{'WIN ' if won else 'LOSS':<7}{b['label']:<34}{b['entry_price']:>6.2f}"
                   f"{ct:>5}{per*ct:>9.2f}  {b['ticker']}")
         n = len(settled)
         print("-" * 82)
         print(f"Record {int(wins)}-{n-int(wins)} ({wins/n:.0%})   P&L {pnl:+.2f}/contract   "
               f"ROI {pnl/staked:+.0%}   net ${dollar:+.2f}")
+
+        def _line(label: str, st: dict, indent: str = "") -> str:
+            roi = f"{st['pnl'] / st['staked']:+.0%}" if st["staked"] else "  n/a"
+            return (f"{indent}{label:<14}{st['w']:>3}-{st['n'] - st['w']:<3} "
+                    f"({st['w'] / st['n']:>3.0%})   ROI {roi:>5}   net ${st['dollar']:+.2f}")
+
+        if len(tally) > 1 or any(len(k) > 1 for k in tally.values()):
+            print("\nBY SPORT")
+            for sport in sorted(tally):
+                kinds = tally[sport]
+                roll = {"n": 0, "w": 0, "pnl": 0.0, "staked": 0.0, "dollar": 0.0}
+                for st in kinds.values():
+                    for k in roll:
+                        roll[k] += st[k]
+                print(_line(sport.upper(), roll, "  "))
+                for kind in sorted(kinds):
+                    print(_line(kind, kinds[kind], "      "))
+
+        sport_bits = []
+        for sport in sorted(tally):
+            roll_n = sum(st["n"] for st in tally[sport].values())
+            roll_w = sum(st["w"] for st in tally[sport].values())
+            roll_d = sum(st["dollar"] for st in tally[sport].values())
+            sport_bits.append(f"{sport.upper()} {roll_w}-{roll_n - roll_w} ${roll_d:+.2f}")
         summary = (f"KALSHI settle: {int(wins)}-{n-int(wins)} ({wins/n:.0%}), "
-                   f"net ${dollar:+.2f}, ROI {pnl/staked:+.0%}. Pending: {len(pending)}.")
+                   f"net ${dollar:+.2f}, ROI {pnl/staked:+.0%}"
+                   + (f" [{' | '.join(sport_bits)}]" if len(tally) > 1 else "")
+                   + f". Pending: {len(pending)}.")
     else:
         summary = f"KALSHI settle: 0 bets settled, {len(pending)} pending."
     if pending:
@@ -467,6 +518,8 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("settle", help="grade the paper-trade ledger vs outcomes")
     s.add_argument("date", nargs="?", default=None, help="filter to games on YYYY-MM-DD")
     s.add_argument("--notify", action="store_true", help="text a summary of the results")
+    s.add_argument("--sport", default=None, choices=["mlb", "nfl"],
+                   help="grade only one sport's bets (default: all, broken out by sport)")
     s.set_defaults(func=cmd_settle)
 
     s = sub.add_parser("calibration", help="show adaptive confidence calibration by market type")

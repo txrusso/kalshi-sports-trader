@@ -99,8 +99,6 @@ Live submission is intentionally disabled in this build — the agent is
 recommend-only. To actually trade, place the previewed order yourself in Kalshi,
 or wire up your own execution module (see `engine/execution.py`).
 
-The old entrypoint still works: `run.py --once` (= `cli.py rank`), `run.py` (= `cli.py loop`).
-
 Health check (auth + sample data): `.venv/Scripts/python.exe -m tests.smoke_auth`
 
 ## Commands (Claude Code slash commands)

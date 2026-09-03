@@ -117,7 +117,7 @@ class Settings:
     bankroll_usd: float = 50.0           # fallback stake base if the balance fetch fails
                                          # (= total deposited capital: $20 + $30 added 2026-09-01)
     # kelly_fraction was 0.35, max_stake_pct was 0.15 (raised together 2026-08-08 --
-    # see CLAUDE.md). Both lowered 2026-08-13 after backtest/bankroll_sim.py's
+    # see docs/research-log.md). Both lowered 2026-08-13 after backtest/bankroll_sim.py's
     # walk-forward sweep: a Kelly-bankroll simulation on real settled markets/prices
     # showed max drawdown climbing steeply above ~0.25-0.30 fraction (73% max
     # drawdown at 0.5) while dollar-weighted ROI on held-out data did not keep pace --
@@ -126,7 +126,18 @@ class Settings:
     # same day after a finer sweep: 0.25 beat 0.30 on BOTH halves of the dataset
     # independently (so it isn't sensitive to which half is "train"), with both higher
     # ROI and lower drawdown -- not just a train-set-flattering pick.
-    kelly_fraction: float = 0.25         # fractional Kelly for suggested size
+    # 0.25 -> 0.20 on 2026-09-03, explicitly to cut drawdown. Sweep 0.05-0.35 showed
+    # max drawdown falling monotonically with the fraction on BOTH splits; 0.20 cut it
+    # 23.9% -> 19.5% (validate) and 32.6% -> 25.0% (train) while ROI-on-staked held flat
+    # to slightly better on both (validate 0.122 -> 0.133, train -0.006 -> +0.002) and
+    # bet count barely moved (validate 308 -> 304, train 197 -> 175). The cost is
+    # compounding, not edge: validate terminal bankroll $97 -> $70, since ROI-on-staked
+    # is size-invariant while growth is not -- a deliberate variance-for-growth trade at
+    # the user's request, not a free win. Do NOT go below ~0.15: with a ~$58 bankroll and
+    # ~$0.50 contracts the integer-contract floor starts dropping real bets (at 0.10 only
+    # 96/308 validate and 39/197 train bets get taken at all -- Kelly wants <1 contract
+    # and it rounds to zero), so below that the rounding, not Kelly, becomes the sizer.
+    kelly_fraction: float = 0.20         # fractional Kelly for suggested size
     # max_stake_pct history: 0.15 (orig) -> 0.08 (2026-08-13) -> 0.05 (2026-08-29),
     # each step down after backtest/bankroll_sim.py walk-forward sweeps showed lower
     # values cut max drawdown on held-out data without giving up ROI (0.05 matched
@@ -149,8 +160,8 @@ class Settings:
     # window -> worst case ~15 min notice, best case up to 45 min.
 
     # --- Order safety caps (used by the guarded `place` preview) ---
-    max_order_contracts: int = 200        # hard cap on contracts per order
-    max_order_cost_usd: float = 100.0     # hard cap on $ risked per order
+    max_order_contracts: int = 4000        # hard cap on contracts per order
+    max_order_cost_usd: float = 1000.0     # hard cap on $ risked per order
 
     def base_url(self) -> str:
         return KALSHI_DEMO_BASE if self.use_demo else KALSHI_API_BASE

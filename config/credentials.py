@@ -1,13 +1,13 @@
 """Load Kalshi API credentials from the local key file.
 
-The key file (default: C:\\Users\\txrus\\Portfolio\\Kal_API.txt) has the form:
+Point KALSHI_KEY_FILE at a file of the form:
 
     APIkeyid = <uuid>
     Privatekey = -----BEGIN RSA PRIVATE KEY-----
     <base64 lines>
     -----END RSA PRIVATE KEY-----
 
-Secrets are read at runtime and never logged or printed.
+Keep it outside the repo. Secrets are read at runtime and never logged or printed.
 """
 from __future__ import annotations
 
@@ -18,7 +18,9 @@ from pathlib import Path
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
 
-DEFAULT_KEY_FILE = r"C:\Users\txrus\Portfolio\Kal_API.txt"
+# Kept outside the repo so it can never be committed: a sibling of the project
+# directory. Override with the KALSHI_KEY_FILE environment variable.
+DEFAULT_KEY_FILE = str(Path(__file__).resolve().parents[2] / "Kal_API.txt")
 
 
 @dataclass

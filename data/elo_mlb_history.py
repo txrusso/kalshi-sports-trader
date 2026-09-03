@@ -1,6 +1,6 @@
 """Builds and disk-caches MLB Elo training history (signals/elo_mlb.py) for live use
 in data/fair_value.py. Refetches at most once/day -- KalshiPaperLoop restarts daily
-anyway (see CLAUDE.md), and a day-old completed-games snapshot is all rating_before()
+anyway (see docs/research-log.md), and a day-old completed-games snapshot is all rating_before()
 ever needs to answer a pregame question (only games strictly before the query date
 matter). Ratings are built once per process and reused for every scan cycle, the same
 process-lifetime-cache treatment data/mlb_stats.py's team_run_rates() already gets.

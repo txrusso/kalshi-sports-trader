@@ -142,7 +142,7 @@ def _keep_awake() -> None:
     allowed to turn off) at the user's request, to be watched for a cycle or
     two -- if scans start getting delayed/missed again, re-add
     ES_DISPLAY_REQUIRED (0x00000002) to the flags below. Belt-and-suspenders
-    with the AC power-plan timeouts (see CLAUDE.md); does not override a
+    with the AC power-plan timeouts (see docs/research-log.md); does not override a
     manual sleep, lid-close, or shutdown. Windows only.
     """
     if sys.platform != "win32":

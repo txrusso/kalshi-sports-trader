@@ -1,7 +1,7 @@
 """Walk-forward Elo ratings for NFL teams, built once from nflverse's full game
 history (data/nfl_data.py). This is the NFL winner model's core signal, standing
 in for MLB's log5-on-season-record (17 games/season is too few for a stable
-in-season win-pct signal -- see CLAUDE.md's rationale).
+in-season win-pct signal -- see docs/research-log.md's rationale).
 
 Leak-safe by construction: rating_before() only ever uses games strictly before
 the query date, and each team's rating carries over season-to-season with

@@ -1,0 +1,19 @@
+# Copy to notify_config.txt (gitignored) and fill in. Both channels are optional
+# and independent -- leave either side blank and those alerts are skipped silently.
+
+# --- Text messages, via a carrier email-to-SMS gateway -----------------------
+# Any SMTP sender works. Gmail needs an App Password, not the account password.
+smtp_host = smtp.gmail.com
+smtp_port = 587
+sender_email = you@gmail.com
+sender_password = your_app_password_here
+# Your number at your carrier's SMS gateway, e.g. 5551234567@vtext.com (Verizon),
+# @txt.att.net (AT&T), @tmomail.net (T-Mobile).
+recipient = 5551234567@example.com
+
+# --- Push notifications, via ntfy.sh ----------------------------------------
+# Free and account-less: pick a long random topic name, subscribe to it in the
+# ntfy phone app, and put the same string here. Anyone who knows the topic can
+# read it, so don't make it guessable.
+ntfy_topic =
+ntfy_server = https://ntfy.sh

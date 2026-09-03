@@ -4,7 +4,7 @@ Pre-game only for v1 -- no live in-game model yet (a documented gap; MLB has
 one, NFL doesn't, same treatment as MLB's own documented gaps like missing
 weather). Kickoff time comes from the market's own `occurrence_datetime`
 (kalshi/normalize.py) since NFL tickers, unlike MLB's, don't encode a
-time-of-day (confirmed live 2026-08-29 -- see CLAUDE.md).
+time-of-day (confirmed live 2026-08-29 -- see docs/research-log.md).
 """
 from __future__ import annotations
 

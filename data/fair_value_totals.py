@@ -33,7 +33,7 @@ _TOTAL_RE = re.compile(r"KXMLBTOTAL-(\d{2})([A-Z]{3})(\d{2})(\d{2})(\d{2})([A-Z]
 # either split alone. This does NOT fix the separate low-end mean-bias issue found in
 # the same investigation -- lam is biased low for a subset of shootout games (several
 # tied to hitter-friendly/wind-affected parks like Wrigley), which really wants a
-# weather signal the model doesn't have (a known gap -- see CLAUDE.md's totals gaps).
+# weather signal the model doesn't have (a known gap -- see docs/research-log.md's totals gaps).
 TOTALS_PHI = 2.2
 # The low-P(over)/high-line miscalibration (0-10% bucket predicts ~5.6%, hits ~36%) is a
 # too-thin NB right tail, BUT a heavier-right-tail blowout mixture was tested and reverted

@@ -13,3 +13,15 @@ __pycache__/
 logs/
 snapshots/
 output/
+
+# Fetched data caches. Regenerated on demand (nflverse games.csv, the MLB Elo
+# history walk, and the bankroll_sim price cache) -- several MB of derived data
+# that has no business in the history.
+data/nfl_games_cache.csv
+data/elo_mlb_history_cache.json
+backtest/elo_mlb_cache.json
+backtest/bankroll_sim_cache.json
+
+# Local scratch notes and editor/assistant config
+CLAUDE.md
+.claude/

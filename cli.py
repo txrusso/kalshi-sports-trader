@@ -341,7 +341,7 @@ def cmd_settle(args) -> None:
         pnl = staked = wins = dollar = 0.0
         # Per-sport / per-market-kind tallies. MLB and NFL share one account, ledger and
         # dashboard, but they are two independently-validated models (NFL's has no real
-        # regular-season track record yet -- see CLAUDE.md), so a single blended P&L line
+        # regular-season track record yet -- see docs/research-log.md), so a single blended P&L line
         # hides which one is actually working. Keyed off config/sports.py, so a third
         # sport would show up here automatically.
         tally: dict[str, dict[str, dict]] = {}

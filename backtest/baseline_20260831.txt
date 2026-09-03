@@ -37,7 +37,7 @@ IC diagnoses OI as weak; it does NOT license a re-weight -- that needs the ROI r
 ============================================================
 WEATHER EXPERIMENT (Priority 1) -- BUILT, WALK-FORWARD TESTED, REVERTED
 ============================================================
-Hypothesis (from CLAUDE.md): the totals 0-10% low-bucket miscalibration
+Hypothesis (from the totals gaps in docs/research-log.md): the totals 0-10% low-bucket miscalibration
 (pred ~5.6% over, actual ~36%) is driven by missing weather (wind-out days, esp Wrigley).
 
 Mechanism built: schedule `weather` hydrate -> parse wind(out/in x mph)+temp ->

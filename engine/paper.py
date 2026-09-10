@@ -18,8 +18,8 @@ from pathlib import Path
 from typing import Optional
 
 from config.settings import OUTPUT_DIR, EASTERN
-from config.sports import market_kind
-from data.games import match_game
+from config.sports import market_kind, sport_of
+from data.games import Game, match_game
 from signals.recommendation import Recommendation
 
 log = logging.getLogger("engine.paper")
@@ -31,8 +31,23 @@ _MONTHS = {m: i for i, m in enumerate(
 # -- on 2026-09-01 NYM@TB and SEA@BOS were stamped 01:40Z/01:45Z (9:40/9:45pm ET) for games
 # whose real first pitch was 22:40Z/22:45Z (6:40/6:45pm ET, MLB Stats API confirmed), a whole
 # 3-hour skew that pushed both games out of the trigger window and silently killed their
-# paper bets. NFL tickers carry no time-of-day segment, so they still fall back to
-# occurrence_datetime (there is no ticker time to prefer).
+# paper bets.
+#
+# NFL tickers carry no time-of-day segment, so there is no ticker time to prefer -- and the
+# same +3h skew is present on NFL markets too (confirmed 2026-09-08 against nflverse's own
+# gametime on five Week 1/2 markets: Kalshi said 11:20pm ET for a 8:20pm ET opener, 4:00pm
+# for the 1:00pm slot, etc). NFL therefore resolves kickoff from the nflverse schedule
+# (NflGame.kickoff_utc) instead. This path had never fired in production -- preseason
+# fair-value refusal meant no NFL rec ever reached the trigger, and the ledger held 0 NFL
+# rows -- so the skew would have silently killed every NFL bet from Week 1 onward.
+#
+# NBA tickers (added 2026-09-10) also carry no time-of-day segment, but UNLIKE NFL there is
+# no independent tip-off-time source to check for the same skew against -- data/nba_data.py's
+# game logs carry no time-of-day at all, only game_date. So NBA has no choice but to trust
+# occurrence_datetime as-is (falls through to `fp = sched_fp or r.game_datetime` below with
+# sched_fp always None for NBA). If the same +3h-style skew exists here, it would silently
+# misfire the NBA trigger window the same way it did for NFL until that was caught -- worth a
+# manual spot check against a real broadcast tip-off time before trusting this in production.
 _MLB_TICKER_TIME_RE = re.compile(r"^KXMLB(?:GAME|TOTAL)-(\d{2})([A-Z]{3})(\d{2})(\d{2})(\d{2})")
 
 
@@ -51,6 +66,16 @@ def first_pitch_from_ticker(ticker: str) -> Optional[datetime]:
     except ValueError:
         return None
     return naive_et.replace(tzinfo=EASTERN).astimezone(timezone.utc)
+
+
+def _lookup_game(ticker: str, clients: dict, sched_cache: dict) -> Optional[Game]:
+    """Best-effort schedule lookup. A flaky MLB Stats API / nflverse fetch must never
+    stall or crash the trigger, so every failure degrades to None."""
+    try:
+        return match_game(ticker, clients, sched_cache)
+    except Exception:
+        log.warning("paper-trigger: match_game failed for %s.", ticker, exc_info=True)
+        return None
 
 
 class PaperLedger:
@@ -83,28 +108,33 @@ def run_paper_trigger(recs: list[Recommendation], clients: dict, ledger: PaperLe
     """Paper-bet any recommended game that starts within `window_minutes` and
     hasn't been bet yet. Returns the newly placed paper bets.
 
-    `clients` is {"mlb": MlbStatsClient(), "nfl": NflDataClient()} -- only used
-    to label the ledger row with a "matchup" string (data/games.py::match_game);
-    the trigger's own timing comes from `r.game_datetime` (the market's own
-    occurrence_datetime, sport-agnostic, confirmed present on both MLB and NFL
-    markets), not a schedule lookup."""
+    `clients` is {"mlb": MlbStatsClient(), "nfl": NflDataClient(), "nba": NbaDataClient()},
+    used both to label the ledger row with a "matchup" string and -- for NFL -- to resolve
+    the real kickoff (data/games.py::match_game). Kalshi's own `occurrence_datetime`
+    (`r.game_datetime`) is only a last-resort fallback for MLB/NFL, and the ONLY option for
+    NBA (no independent kickoff source exists yet); see the module note above."""
     now = now or datetime.now(timezone.utc)
     sched_cache: dict = {}
     placed: list[dict] = []
     for r in recs:
         event_key = r.ticker.rsplit("-", 1)[0]
-        # First pitch: prefer the MLB ticker's embedded ET time (Kalshi-authoritative)
-        # over occurrence_datetime, which has been observed mis-stamped by whole hours and
-        # would silently push a game out of the trigger window. NFL tickers have no embedded
-        # time, so first_pitch_from_ticker() returns None and we fall back to occurrence.
-        ticker_fp = first_pitch_from_ticker(r.ticker)
-        fp = ticker_fp or r.game_datetime
-        if ticker_fp is not None and r.game_datetime is not None:
-            skew_min = abs((ticker_fp - r.game_datetime).total_seconds()) / 60.0
+        # Start time, in preference order (occurrence_datetime last -- it carries a
+        # systematic +3h skew on MLB/NFL; see the module note above):
+        #   MLB -> the ET first pitch embedded in the ticker.
+        #   NFL -> nflverse's gameday+gametime, via the schedule lookup.
+        #   NBA -> occurrence_datetime directly (no independent source to prefer yet).
+        g: Optional[Game] = None
+        sched_fp = first_pitch_from_ticker(r.ticker)
+        if sched_fp is None and sport_of(r.ticker) == "nfl":
+            g = _lookup_game(r.ticker, clients, sched_cache)
+            sched_fp = g.game_datetime if g else None
+        fp = sched_fp or r.game_datetime
+        if sched_fp is not None and r.game_datetime is not None:
+            skew_min = abs((sched_fp - r.game_datetime).total_seconds()) / 60.0
             if skew_min > 30:
-                log.warning("paper-trigger: %s occurrence_datetime %s disagrees with ticker "
-                            "first pitch %s by %.0f min; trusting the ticker.",
-                            r.ticker, r.game_datetime.isoformat(), ticker_fp.isoformat(), skew_min)
+                log.warning("paper-trigger: %s occurrence_datetime %s disagrees with "
+                            "scheduled start %s by %.0f min; trusting the schedule.",
+                            r.ticker, r.game_datetime.isoformat(), sched_fp.isoformat(), skew_min)
         minutes = (fp - now).total_seconds() / 60.0 if fp is not None else None
         # "In the trigger window" = game starts within window_minutes (and hasn't yet).
         in_window = minutes is not None and 0 < minutes <= window_minutes
@@ -119,20 +149,16 @@ def run_paper_trigger(recs: list[Recommendation], clients: dict, ledger: PaperLe
                 log.info("paper-trigger: %s in window but Kelly-sized to 0 contracts; skip.", r.ticker)
             continue                      # Kelly-sized to nothing -- not an actionable bet
         if fp is None:
-            log.warning("paper-trigger: %s has no game_datetime (occurrence_datetime missing); "
-                        "cannot time-trigger.", r.ticker)
+            log.warning("paper-trigger: %s has no resolvable start time (no ticker time, no "
+                        "schedule match, no occurrence_datetime); cannot time-trigger.", r.ticker)
             continue
         if not in_window:
             continue                          # too early (or already started) -- normal, no log
-        # Matchup label is best-effort: a flaky MLB Stats API must never stall or crash
-        # the trigger. On any failure, fall back to the headline -- the bet still records
-        # correctly; only the display label degrades.
-        try:
-            g = match_game(r.ticker, clients, sched_cache)
-        except Exception:
-            log.warning("paper-trigger: match_game failed for %s; using fallback label.",
-                        r.ticker, exc_info=True)
-            g = None
+        # Matchup label is best-effort; on any failure fall back to the headline -- the bet
+        # still records correctly, only the display label degrades. NFL already looked the
+        # game up above for its timing, so this only costs a lookup for MLB.
+        if g is None:
+            g = _lookup_game(r.ticker, clients, sched_cache)
         matchup = f"{g.away_abbr} vs {g.home_abbr}" if g else (r.headline or r.yes_team)
         bet = {
             "ts": now.isoformat(),

@@ -34,15 +34,18 @@ class Settings:
     # Loop cadence (seconds). ~20 min = balanced money-flow tracking.
     scan_interval_seconds: int = 20 * 60
 
-    # --- Market universe (MLB + NFL) ---
+    # --- Market universe (MLB + NFL + NBA) ---
     # Kalshi series tickers for game markets. Discovered/verified at runtime; these
     # are the prefixes we filter events by.
     # KX**GAME = per-game winner markets; KX**TOTAL = total-runs/points (over/under)
-    # ladders. (KXMLB*/KXNFL* futures are excluded — the fair-value model is
-    # game-based.) Both sports scan in the same cycle; config/sports.py dispatches
+    # ladders. (KXMLB*/KXNFL*/KXNBA* futures are excluded — the fair-value model is
+    # game-based.) All sports scan in the same cycle; config/sports.py dispatches
     # each ticker to its sport's fair-value model and calibration bucket.
+    # NBA added 2026-09-10; KXNBAGAME confirmed live (real Oct 20 2026 openers
+    # already listed), KXNBATOTAL confirmed real but not yet listed this far out
+    # (same as MLB/NFL totals) -- see data/nba_data.py for the model build notes.
     sport_series_prefixes: tuple[str, ...] = (
-        "KXMLBGAME", "KXMLBTOTAL", "KXNFLGAME", "KXNFLTOTAL",
+        "KXMLBGAME", "KXMLBTOTAL", "KXNFLGAME", "KXNFLTOTAL", "KXNBAGAME", "KXNBATOTAL",
     )
     include_totals: bool = True           # scan over/under (total runs) markets
     totals_min_mid: float = 0.12          # only consider near-the-money O/U lines
@@ -140,13 +143,23 @@ class Settings:
     kelly_fraction: float = 0.20         # fractional Kelly for suggested size
     # max_stake_pct history: 0.15 (orig) -> 0.08 (2026-08-13) -> 0.05 (2026-08-29),
     # each step down after backtest/bankroll_sim.py walk-forward sweeps showed lower
-    # values cut max drawdown on held-out data without giving up ROI (0.05 matched
-    # 0.08's validate return, +216.6% vs +221.8%, while improving train ROI and
-    # drawdown on both splits). Raised to 0.25 on 2026-08-31 per explicit user
-    # request (confirmed as the 0.25 fraction, not literal 0.25%) -- NOT backtest
-    # validated at this level; every prior sweep in this file found higher
-    # max_stake_pct increased drawdown without a matching ROI gain.
-    max_stake_pct: float = 0.25          # cap suggested stake at 25% of bankroll
+    # values cut max drawdown on held-out data without giving up ROI. Raised to 0.25 on
+    # 2026-08-31 per explicit user request, unvalidated; cut back to 0.06 on 2026-09-07
+    # after a full-grid sweep found 0.25 was not merely suboptimal but INERT -- 0.12,
+    # 0.16, 0.20 and 0.25 all produce byte-identical results, because fractional Kelly
+    # never asks for more than ~11% of bankroll, so the cap never binds and the number
+    # was doing nothing. Values that DO bind form a plateau at 0.045-0.06 beating
+    # production on both splits, replicated independently on two cache builds: at 0.06,
+    # train ROI +0.0018 -> +0.0278 and validate +0.0507 -> +0.0518, with validate max
+    # drawdown 40.7% -> 39.8% and the bet count unchanged (345). Chose 0.06 over the
+    # nominally better 0.045 (validate +0.0583) because 0.045's immediate neighbours
+    # 0.04 and 0.05 BOTH fail the both-splits bar -- it's a knife edge -- whereas
+    # 0.055/0.06/0.065 sit on a flat shelf (train +0.0287/+0.0278/+0.0288). 0.06 is also
+    # the least aggressive point in the band, so it stays non-binding on bet count as
+    # the bankroll grows. Honest read: 0.06 TIES on validate (+0.001) and clearly wins on
+    # train -- the argument is picking a live value over a provably dead one, not a
+    # tuned value over a good one.
+    max_stake_pct: float = 0.06          # cap suggested stake at 6% of bankroll
 
     # --- Trade policy ---
     pregame_only: bool = True             # only recommend games in "Preview" (no live/final)

@@ -212,10 +212,60 @@ def build_cache(path: Path = CACHE_PATH) -> dict:
 
     out = {"games": games_cache, "winner_rows": winner_rows, "totals_rows": totals_rows,
            "built_at": datetime.now(timezone.utc).isoformat()}
+    out = _merge_with_existing(out, path)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(out, f)
     print("saved", path)
     return out
+
+
+def _merge_with_existing(fresh: dict, path: Path) -> dict:
+    """Union the freshly-fetched rows with whatever the cache already held.
+
+    Kalshi's /markets?status=settled endpoint serves only a ROLLING ~68-day window of
+    settled markets, so a plain overwrite silently AMPUTATES the oldest games on every
+    refresh. The 2026-09-06 rebuild lost Jun 22-30 outright (111 winner + 109 totals
+    events) and cut the train split from n=175 to n=128 bets. Left alone this erodes the
+    train window (KALSHI_DATA_START..TRAIN_END) from the back until it is empty and the
+    project's both-splits discipline breaks WITHOUT ever raising an error.
+
+    Merging is safe because a settled row is immutable: across the 743 winner / 741
+    totals events present in both the 2026-08-29 and 2026-09-06 builds, every
+    entry_price and every outcome matched exactly (0 differences). Rows are keyed by
+    event -- the same dedupe key build_cache uses upstream -- so a re-fetched event
+    replaces its own older copy instead of duplicating it.
+    """
+    if not path.exists():
+        return fresh
+    try:
+        with open(path, encoding="utf-8") as f:
+            prior = json.load(f)
+    except (OSError, ValueError) as e:
+        print(f"  (could not read prior cache to merge: {e}) -- writing fresh rows only")
+        return fresh
+    merged = {"games": {**prior.get("games", {}), **fresh["games"]},
+              "built_at": fresh["built_at"]}
+    for kind in ("winner_rows", "totals_rows"):
+        by_event = {r["event"]: r for r in prior.get(kind, [])}
+        by_event.update({r["event"]: r for r in fresh[kind]})
+        merged[kind] = sorted(by_event.values(), key=lambda r: (r["date"], r["ticker"]))
+        retained = len(merged[kind]) - len(fresh[kind])
+        print(f"  {kind}: {len(fresh[kind])} fetched + {retained} retained from prior "
+              f"cache = {len(merged[kind])}")
+    return merged
+
+
+def _warn_if_train_thin(cache: dict) -> None:
+    """The train split only means anything while the cache still reaches back to
+    KALSHI_DATA_START; see _merge_with_existing() for why it can silently shrink."""
+    dates = [r["date"] for r in cache["winner_rows"] + cache["totals_rows"]]
+    if not dates:
+        return
+    earliest, n_train = min(dates), sum(1 for d in dates if d <= TRAIN_END)
+    if earliest > KALSHI_DATA_START or n_train < 100:
+        print(f"WARNING: cache reaches back only to {earliest} (wanted {KALSHI_DATA_START}); "
+              f"{n_train} rows fall in the train window (<= {TRAIN_END}). Train-split "
+              f"numbers are weakened or meaningless -- see _merge_with_existing().")
 
 
 def load_cache(path: Path = CACHE_PATH) -> dict:
@@ -474,6 +524,7 @@ def main() -> None:
     args = ap.parse_args()
 
     cache = build_cache() if (args.refresh or not CACHE_PATH.exists()) else load_cache()
+    _warn_if_train_thin(cache)
     elo_cache = build_elo_cache() if (args.refresh_elo or not ELO_CACHE_PATH.exists()) else load_elo_cache()
     ratings = EloRatings(elo_cache["games"])
 

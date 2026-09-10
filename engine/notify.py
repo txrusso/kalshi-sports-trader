@@ -104,6 +104,8 @@ _KALSHI_SERIES_SLUG = {
     "KXMLBTOTAL": "professional-baseball-total-runs",
     "KXNFLGAME": "professional-football-game",
     "KXNFLTOTAL": "professional-football-total-points",
+    "KXNBAGAME": "pro-basketball-game",
+    "KXNBATOTAL": "pro-basketball-total-points",
 }
 
 

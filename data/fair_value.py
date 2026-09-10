@@ -240,12 +240,15 @@ class FairValueRouter:
     logic for which model to call -- one router replaces the four models
     threaded around individually."""
 
-    def __init__(self, mlb_winner, mlb_totals, nfl_winner, nfl_totals):
+    def __init__(self, mlb_winner, mlb_totals, nfl_winner, nfl_totals,
+                nba_winner=None, nba_totals=None):
         self._models = {
             ("mlb", "winner"): mlb_winner,
             ("mlb", "total"): mlb_totals,
             ("nfl", "winner"): nfl_winner,
             ("nfl", "total"): nfl_totals,
+            ("nba", "winner"): nba_winner,
+            ("nba", "total"): nba_totals,
         }
 
     def estimate(self, ticker: str, quote=None) -> FairValue:

@@ -41,6 +41,40 @@ with drawdown falling on both too. 3¢ was leaving money on the table by taking 
 bets. Landed at 5.5 from the middle of the supported band rather than the single best grid
 point.
 
+**`max_stake_pct` was doing nothing at all.** A full grid over every sweepable parameter on
+2026-09-07 turned up exactly one that wasn't near its optimum, and the interesting part is
+*why*: at 0.25 the cap was **inert**. Values of 0.12, 0.16, 0.20 and 0.25 produce
+byte-identical results, because fractional Kelly never asks for more than about 11% of
+bankroll — the cap simply never binds, so the number was decorative. It had been raised to
+0.25 by request on 2026-08-31 and never validated, and the sweep says the level was not so
+much wrong as unused.
+
+Values that *do* bind form a plateau at 0.045–0.06 that beats production on both splits, and
+it replicated independently on two separate cache builds. At 0.06 training ROI goes +0.0018
+→ +0.0278, validation +0.0507 → +0.0518, validation drawdown 40.7% → 39.8%, bet count
+unchanged at 345. Shipped 0.06 rather than the nominally better 0.045 (validation +0.0583)
+because 0.045's immediate neighbours 0.04 and 0.05 *both* fail the both-splits bar — a knife
+edge — while 0.055/0.06/0.065 sit on a flat shelf (training +0.0287/+0.0278/+0.0288). 0.06 is
+also the least aggressive point in the band, so it stays non-binding on bet count as the
+bankroll grows.
+
+Read this one honestly: 0.06 **ties** on validation (+0.001) and wins clearly on training.
+The argument for it is that it replaces a provably dead value with a live one, not that it's
+a big edge gain.
+
+The same grid re-confirmed the rest. `sp_weight` 0.62, `pitcher_reg_ip` 40, `totals_phi` 2.2,
+`min_edge` 5.5¢ and `elo_home_field` 27.85 are all clean validation peaks. `winner_regress`
+and `sp_winner_beta` stay at 0 — both still improve validation and fail training, the exact
+shape that got them reverted before. `league_shrink` 0.05 cleared the bar on one cache build
+and lost on the other, so it's noise. `elo_weight`/`K_FACTOR` stay at 0.2/3.5 despite
+0.1/4.0 edging them on one build; the neighbouring cells disagree between builds, which is
+the same knife edge noted on 2026-09-02.
+
+The money-flow weights, `min_confidence` and `max_spread_cents` still can't be tuned at all.
+Replaying snapshots through the real recommendation logic at the current 5.5¢ gate yields
+n=15 training / 73 validation bets, and nothing wins on both splits. `max_spread_cents` is
+also close to inert — 2¢ through 6¢ barely changes the bet set.
+
 ---
 
 ## The winner model
@@ -265,6 +299,41 @@ hiding inside the other's. Confidence calibration is likewise bucketed by sport.
 
 ---
 
+## NBA, and the case for/against other sports
+
+Scoped 2026-09-10 by auditing live Kalshi markets and candidate free data sources before
+writing any model code, the same way NFL's feasibility was checked first. The audit covered
+NBA, NHL, and briefly why soccer and college sports don't fit the current architecture.
+
+**NBA** checked out cleanly. `KXNBAGAME`/`KXNBATOTAL` are real, live, and ticker-shaped
+exactly like NFL's (no time-of-day segment, `rules_primary` carries the matchup since the
+market `title` doesn't). Kalshi's 30 team codes matched a candidate data source
+(`sportsdataverse-data`'s NBA game logs) exactly, with no NFL-style remap needed. So it was
+built the same day — see the "NBA model" section of CLAUDE.md for the full build, the
+already-corrected `HOME_FIELD_ELO` finding, and the one real open gap (the 2026-27 season's
+game-log file doesn't exist upstream yet, five weeks before Kalshi's own listed openers;
+should resolve on its own before the season starts trading, but worth a live recheck).
+
+**NHL** scoped but not built. `KXNHLGAME`/`KXNHLTOTAL` are real (confirmed by search, not
+yet live-open this far from October), and hockey always has a winner — no draw problem the
+way soccer would have. The data source is actually the best of the three: `api-web.nhle.com`
+is a live official NHL API, confirmed reachable, the NHL analog of MLB Stats API rather than
+a third-party mirror — meaning it could plausibly support an in-game live model the way NFL
+never got. The real open question before building totals: whether Kalshi's total-goals
+settlement counts a shootout-winning goal, since NHL's low goal count (~3/team/game) makes
+the totals model more sensitive to that kind of definitional detail than NBA's or MLB's.
+
+**Why not soccer**: draws break the binary win/lose assumption baked into the whole
+recommendation pipeline (`headline_for`, side selection, `resolve_outcomes`) — Kalshi's
+soccer markets are 3-way (win/draw/lose), and that's a real restructuring, not a new data
+source plugged into the existing shape.
+
+**Why not college football/basketball**: real Kalshi volume, but a noisier team-strength
+signal (roster churn every year, weaker historical baselines than the pros) for a worse
+return on the same build effort as NBA/NHL.
+
+---
+
 ## Operational notes
 
 The loop needs the machine awake and online, which is more fragile than it sounds. Two
@@ -307,3 +376,32 @@ recommendations from 4 to 8–9, and cycle time from ~12s to ~30s, which is noth
 1800-second interval. If both sports ever run heavy slates concurrently again, check this
 first — the symptom is a market with a live edge missing from `rank` while `inspect` on its
 ticker shows the edge is real.
+
+### `--refresh` used to eat the training split
+
+Found on 2026-09-07 while rebuilding the cache before a parameter grid. Kalshi's
+`/markets?status=settled` endpoint serves only a **rolling window of roughly 68 days** of
+settled markets. Local pagination is uncapped, so this isn't a truncation bug in
+`fetch_settled_markets` — the data is simply gone from the API. That means a plain overwrite
+on `--refresh` amputates the oldest games every time: the 2026-09-06 rebuild silently lost
+Jun 22–30 entirely, 111 winner and 109 totals events, dropping the training split from n=175
+to n=128 bets.
+
+The failure is quiet and it compounds. `TRAIN_END` is 2026-07-15, so a couple more refreshes
+would have left the training split empty, and every "beats production on both splits" check
+in this file would have degraded to a validation-only test **without raising an error**. The
+whole discipline the project runs on would have quietly stopped working.
+
+`build_cache` now merges instead of overwriting. That's safe because a settled row is
+immutable — across the 743 winner and 741 totals events present in both the 2026-08-29 and
+2026-09-06 builds, every entry price and every outcome matched exactly, zero differences.
+Rows key by event, the same dedupe key the builder already uses upstream. `_warn_if_train_thin()`
+prints a warning if the cache ever stops reaching back to `KALSHI_DATA_START` anyway.
+
+Merging the two surviving builds recovered a cache spanning Jun 22 – Sep 5, 961 winner and
+957 totals rows, about 13% more data than either build alone. The Jun 7–21 games are gone for
+good, so the warning fires today and correctly keeps firing.
+
+One thing the fuller data changed: validation totals ROI collapsed from +0.127 to roughly
+zero once Aug 29 – Sep 5 was included, and validation max drawdown rose to 40.7%. Winner ROI
+held at +0.119. Worth watching rather than acting on — it's one bad week, not a signal.

@@ -16,6 +16,8 @@ SPORT_PREFIXES: dict[str, tuple[str, str]] = {
     "KXMLBTOTAL": ("mlb", "total"),
     "KXNFLGAME": ("nfl", "winner"),
     "KXNFLTOTAL": ("nfl", "total"),
+    "KXNBAGAME": ("nba", "winner"),
+    "KXNBATOTAL": ("nba", "total"),
 }
 
 

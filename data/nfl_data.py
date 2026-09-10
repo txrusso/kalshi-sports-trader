@@ -19,13 +19,13 @@ import io
 import logging
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 import requests
 
-from config.settings import PROJECT_ROOT
+from config.settings import PROJECT_ROOT, EASTERN
 
 log = logging.getLogger("data.nfl")
 
@@ -96,9 +96,30 @@ class NflGame:
     home_qb: str = ""
     roof: str = ""
     surface: str = ""
+    gametime: str = ""       # "HH:MM" kickoff, US/Eastern (nflverse convention)
 
     def teams(self) -> set[str]:
         return {self.away_abbr, self.home_abbr}
+
+    @property
+    def kickoff_utc(self) -> Optional[datetime]:
+        """Real kickoff as UTC, from gameday + gametime (nflverse stamps gametime
+        in US/Eastern). None when either field is missing/unparseable.
+
+        This exists because Kalshi's own `occurrence_datetime` is NOT trustworthy
+        for scheduling: it carries a systematic +3h skew on both sports (see
+        engine/paper.py's _MLB_TICKER_TIME_RE note). MLB can fall back to the ET
+        time embedded in its ticker, but NFL tickers carry no time-of-day segment,
+        so nflverse's gametime is the only reliable kickoff source for NFL.
+        Verified 2026-09-08 across five Week 1/2 markets: every Kalshi
+        occurrence_datetime was exactly 3h late vs. this value."""
+        if not self.date_str or not self.gametime:
+            return None
+        try:
+            naive_et = datetime.strptime(f"{self.date_str} {self.gametime}", "%Y-%m-%d %H:%M")
+        except ValueError:
+            return None
+        return naive_et.replace(tzinfo=EASTERN).astimezone(timezone.utc)
 
     @property
     def state(self) -> str:
@@ -175,6 +196,7 @@ class NflDataClient:
                 home_qb=row.get("home_qb_name", "") or "",
                 roof=row.get("roof", "") or "",
                 surface=row.get("surface", "") or "",
+                gametime=row.get("gametime", "") or "",
             ))
         out.sort(key=lambda g: g.date_str)
         self._games = out

@@ -1,11 +1,12 @@
 """Cross-sport game lookup + outcome resolution, dispatched by
 config.sports.sport_of(). Replaces the MLB-only `_match_game`/`resolve_outcomes`
 logic that used to be duplicated across engine/paper.py and
-backtest/evaluate.py -- now that there are two sports, a single dispatch point
-is a real de-duplication, not a speculative abstraction.
+backtest/evaluate.py -- now that there are multiple sports, a single dispatch
+point is a real de-duplication, not a speculative abstraction.
 
-`clients` is always {"mlb": MlbStatsClient(), "nfl": NflDataClient()}; callers
-build it once (per CLI invocation / loop lifetime) and pass it through.
+`clients` is always {"mlb": MlbStatsClient(), "nfl": NflDataClient(),
+"nba": NbaDataClient()}; callers build it once (per CLI invocation / loop
+lifetime) and pass it through.
 """
 from __future__ import annotations
 
@@ -18,8 +19,11 @@ from data.fair_value import parse_ticker as parse_mlb_ticker
 from data.fair_value_totals import parse_total_ticker as parse_mlb_total_ticker
 from data.fair_value_nfl import parse_ticker as parse_nfl_ticker
 from data.fair_value_nfl_totals import parse_total_ticker as parse_nfl_total_ticker
+from data.fair_value_nba import parse_ticker as parse_nba_ticker
+from data.fair_value_nba_totals import parse_total_ticker as parse_nba_total_ticker
 from data.mlb_stats import MlbStatsClient
 from data.nfl_data import NflDataClient
+from data.nba_data import NbaDataClient
 
 
 @dataclass
@@ -27,16 +31,15 @@ class Game:
     sport: str
     away_abbr: str
     home_abbr: str
-    game_datetime: Optional[datetime]   # None when unavailable (NFL: not needed for
-                                          # outcome resolution, unlike MLB's)
+    game_datetime: Optional[datetime]   # UTC start time; None when unavailable
     state: str                           # "Preview" / "Live" / "Final"
     winner_abbr: Optional[str]
     total_score: Optional[float]         # runs or points, when Final
 
 
 def build_clients() -> dict:
-    """The standard {"mlb": ..., "nfl": ...} client bundle every caller needs."""
-    return {"mlb": MlbStatsClient(), "nfl": NflDataClient()}
+    """The standard {"mlb": ..., "nfl": ..., "nba": ...} client bundle every caller needs."""
+    return {"mlb": MlbStatsClient(), "nfl": NflDataClient(), "nba": NbaDataClient()}
 
 
 def _match_mlb(ticker: str, mlb: MlbStatsClient, sched_cache: dict) -> Optional[Game]:
@@ -71,7 +74,35 @@ def _match_nfl(ticker: str, nfl: NflDataClient) -> Optional[Game]:
         g = nfl.find_game(pt.date_str, away, home)
     if not g:
         return None
-    return Game("nfl", g.away_abbr, g.home_abbr, None, g.state, g.winner_abbr, g.total_points)
+    return Game("nfl", g.away_abbr, g.home_abbr, g.kickoff_utc, g.state,
+                g.winner_abbr, g.total_points)
+
+
+def _match_nba(ticker: str, nba: NbaDataClient) -> Optional[Game]:
+    if is_total(ticker):
+        pt = parse_nba_total_ticker(ticker)
+        if not pt:
+            return None
+        g = nba.find_game(pt.date_str, pt.away_abbr, pt.home_abbr)
+    else:
+        pt = parse_nba_ticker(ticker)
+        if not pt:
+            return None
+        away = pt.opponent if pt.yes_is_home else pt.yes_team
+        home = pt.yes_team if pt.yes_is_home else pt.opponent
+        g = nba.find_game(pt.date_str, away, home)
+    if not g:
+        return None
+    # No time-of-day in this data source (see data/nba_data.py) -- game_datetime
+    # is always None for NBA; callers fall back to the market's own
+    # occurrence_datetime (same last-resort NFL already documents).
+    return Game("nba", g.away_abbr, g.home_abbr, None, g.state,
+                g.winner_abbr, g.total_points)
+
+
+_TOTAL_PARSERS = {"mlb": parse_mlb_total_ticker, "nfl": parse_nfl_total_ticker,
+                  "nba": parse_nba_total_ticker}
+_WINNER_PARSERS = {"mlb": parse_mlb_ticker, "nfl": parse_nfl_ticker, "nba": parse_nba_ticker}
 
 
 def match_game(ticker: str, clients: dict, sched_cache: dict) -> Optional[Game]:
@@ -85,6 +116,8 @@ def match_game(ticker: str, clients: dict, sched_cache: dict) -> Optional[Game]:
         return _match_mlb(ticker, clients["mlb"], sched_cache)
     if sport == "nfl":
         return _match_nfl(ticker, clients["nfl"])
+    if sport == "nba":
+        return _match_nba(ticker, clients["nba"])
     return None
 
 
@@ -97,18 +130,18 @@ def resolve_outcomes(tickers: set[str], clients: dict) -> dict[str, bool]:
         g = match_game(tk, clients, sched_cache)
         if not g or g.state != "Final":
             continue
+        sport = sport_of(tk)
         if is_total(tk):
             if g.total_score is None:
                 continue
-            line = (parse_mlb_total_ticker(tk) if sport_of(tk) == "mlb"
-                    else parse_nfl_total_ticker(tk))
+            line = _TOTAL_PARSERS[sport](tk)
             if not line:
                 continue
             out[tk] = (g.total_score > line.line)
         else:
             if not g.winner_abbr:
                 continue
-            pt = parse_mlb_ticker(tk) if sport_of(tk) == "mlb" else parse_nfl_ticker(tk)
+            pt = _WINNER_PARSERS[sport](tk)
             if not pt:
                 continue
             out[tk] = (g.winner_abbr == pt.yes_team)

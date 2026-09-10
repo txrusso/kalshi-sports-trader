@@ -20,6 +20,7 @@ the two agree on the overall line; `net $` is real dollars at the sizes actually
 Usage:
     py -3 -m backtest.ledger_stats
     py -3 -m backtest.ledger_stats --sport mlb
+    py -3 -m backtest.ledger_stats --sport nba
 """
 from __future__ import annotations
 

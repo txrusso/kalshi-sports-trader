@@ -51,7 +51,8 @@ PROD_WEIGHTS = (DEFAULTS.w_book_imbalance, DEFAULTS.w_trade_flow, DEFAULTS.w_oi_
 # real pregame sources whose game_state was non-None at scan time (so they pass the
 # pregame gate); "none"/"skip_non_pregame" have null prob and never produced a rec, and
 # "live" is excluded to reflect the current pregame_only=True policy.
-_PREGAME_SOURCES = {"pregame_log5", "pregame_totals", "pregame_elo", "pregame_nfl_totals"}
+_PREGAME_SOURCES = {"pregame_log5", "pregame_totals", "pregame_elo", "pregame_nfl_totals",
+                    "pregame_nba_totals"}
 
 
 def _recover_oi_available(bi: float, tf: float, oim: float, stored_score: float) -> bool:

@@ -25,6 +25,8 @@ from config.sports import is_total, sport_of
 from data.fair_value import parse_ticker
 from data.fair_value_nfl import parse_ticker as parse_nfl_ticker
 from data.fair_value_nfl_totals import parse_total_ticker as parse_nfl_total_ticker
+from data.fair_value_nba import parse_ticker as parse_nba_ticker
+from data.fair_value_nba_totals import parse_total_ticker as parse_nba_total_ticker
 from data.fair_value_totals import parse_total_ticker
 from data.games import build_clients, resolve_outcomes
 from signals.recommendation import headline_for
@@ -69,8 +71,12 @@ def _bet_rank(r: dict) -> tuple:
 
 
 def _game_date(ticker: str) -> str | None:
-    if sport_of(ticker) == "nfl":
+    sport = sport_of(ticker)
+    if sport == "nfl":
         p = parse_nfl_total_ticker(ticker) if is_total(ticker) else parse_nfl_ticker(ticker)
+        return p.date_str if p else None
+    if sport == "nba":
+        p = parse_nba_total_ticker(ticker) if is_total(ticker) else parse_nba_ticker(ticker)
         return p.date_str if p else None
     p = parse_total_ticker(ticker) if is_total(ticker) else parse_ticker(ticker)
     return p.date.strftime("%Y-%m-%d") if p else None

@@ -5,8 +5,8 @@ backtest/evaluate.py -- now that there are multiple sports, a single dispatch
 point is a real de-duplication, not a speculative abstraction.
 
 `clients` is always {"mlb": MlbStatsClient(), "nfl": NflDataClient(),
-"nba": NbaDataClient()}; callers build it once (per CLI invocation / loop
-lifetime) and pass it through.
+"nba": NbaDataClient(), "nhl": NhlDataClient()}; callers build it once (per
+CLI invocation / loop lifetime) and pass it through.
 """
 from __future__ import annotations
 
@@ -21,9 +21,12 @@ from data.fair_value_nfl import parse_ticker as parse_nfl_ticker
 from data.fair_value_nfl_totals import parse_total_ticker as parse_nfl_total_ticker
 from data.fair_value_nba import parse_ticker as parse_nba_ticker
 from data.fair_value_nba_totals import parse_total_ticker as parse_nba_total_ticker
+from data.fair_value_nhl import parse_ticker as parse_nhl_ticker
+from data.fair_value_nhl_totals import parse_total_ticker as parse_nhl_total_ticker
 from data.mlb_stats import MlbStatsClient
 from data.nfl_data import NflDataClient
 from data.nba_data import NbaDataClient
+from data.nhl_data import NhlDataClient
 
 
 @dataclass
@@ -38,8 +41,10 @@ class Game:
 
 
 def build_clients() -> dict:
-    """The standard {"mlb": ..., "nfl": ..., "nba": ...} client bundle every caller needs."""
-    return {"mlb": MlbStatsClient(), "nfl": NflDataClient(), "nba": NbaDataClient()}
+    """The standard {"mlb": ..., "nfl": ..., "nba": ..., "nhl": ...} client bundle
+    every caller needs."""
+    return {"mlb": MlbStatsClient(), "nfl": NflDataClient(), "nba": NbaDataClient(),
+            "nhl": NhlDataClient()}
 
 
 def _match_mlb(ticker: str, mlb: MlbStatsClient, sched_cache: dict) -> Optional[Game]:
@@ -100,9 +105,31 @@ def _match_nba(ticker: str, nba: NbaDataClient) -> Optional[Game]:
                 g.winner_abbr, g.total_points)
 
 
+def _match_nhl(ticker: str, nhl: NhlDataClient) -> Optional[Game]:
+    if is_total(ticker):
+        pt = parse_nhl_total_ticker(ticker)
+        if not pt:
+            return None
+        g = nhl.find_game(pt.date_str, pt.away_abbr, pt.home_abbr)
+    else:
+        pt = parse_nhl_ticker(ticker)
+        if not pt:
+            return None
+        away = pt.opponent if pt.yes_is_home else pt.yes_team
+        home = pt.yes_team if pt.yes_is_home else pt.opponent
+        g = nhl.find_game(pt.date_str, away, home)
+    if not g:
+        return None
+    # UNLIKE NBA, this data source DOES carry a real start time -- see
+    # NhlGame.puck_drop_utc / data/nhl_data.py's module docstring.
+    return Game("nhl", g.away_abbr, g.home_abbr, g.puck_drop_utc, g.state,
+                g.winner_abbr, g.total_goals)
+
+
 _TOTAL_PARSERS = {"mlb": parse_mlb_total_ticker, "nfl": parse_nfl_total_ticker,
-                  "nba": parse_nba_total_ticker}
-_WINNER_PARSERS = {"mlb": parse_mlb_ticker, "nfl": parse_nfl_ticker, "nba": parse_nba_ticker}
+                  "nba": parse_nba_total_ticker, "nhl": parse_nhl_total_ticker}
+_WINNER_PARSERS = {"mlb": parse_mlb_ticker, "nfl": parse_nfl_ticker, "nba": parse_nba_ticker,
+                   "nhl": parse_nhl_ticker}
 
 
 def match_game(ticker: str, clients: dict, sched_cache: dict) -> Optional[Game]:
@@ -118,6 +145,8 @@ def match_game(ticker: str, clients: dict, sched_cache: dict) -> Optional[Game]:
         return _match_nfl(ticker, clients["nfl"])
     if sport == "nba":
         return _match_nba(ticker, clients["nba"])
+    if sport == "nhl":
+        return _match_nhl(ticker, clients["nhl"])
     return None
 
 

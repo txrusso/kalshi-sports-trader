@@ -21,6 +21,7 @@ Usage:
     py -3 -m backtest.ledger_stats
     py -3 -m backtest.ledger_stats --sport mlb
     py -3 -m backtest.ledger_stats --sport nba
+    py -3 -m backtest.ledger_stats --sport nhl
 """
 from __future__ import annotations
 

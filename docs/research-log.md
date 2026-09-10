@@ -314,14 +314,26 @@ already-corrected `HOME_FIELD_ELO` finding, and the one real open gap (the 2026-
 game-log file doesn't exist upstream yet, five weeks before Kalshi's own listed openers;
 should resolve on its own before the season starts trading, but worth a live recheck).
 
-**NHL** scoped but not built. `KXNHLGAME`/`KXNHLTOTAL` are real (confirmed by search, not
-yet live-open this far from October), and hockey always has a winner — no draw problem the
-way soccer would have. The data source is actually the best of the three: `api-web.nhle.com`
-is a live official NHL API, confirmed reachable, the NHL analog of MLB Stats API rather than
-a third-party mirror — meaning it could plausibly support an in-game live model the way NFL
-never got. The real open question before building totals: whether Kalshi's total-goals
-settlement counts a shootout-winning goal, since NHL's low goal count (~3/team/game) makes
-the totals model more sensitive to that kind of definitional detail than NBA's or MLB's.
+**NHL** built the same session, right after NBA. `KXNHLGAME`/`KXNHLTOTAL` are real
+(confirmed by search, not yet live-open this far from October), and hockey always has a
+winner — no draw problem the way soccer would have. The data source is the best of the
+three sports added this way: `api-web.nhle.com` is a live official NHL API, confirmed
+reachable, the NHL analog of MLB Stats API rather than a third-party mirror — and unlike
+the NBA mirror, it already had the full 2026-27 season schedule published even though the
+season hadn't started. The shootout-goal question (does Kalshi's total-goals settlement
+count a shootout-winning goal?) got answered empirically before writing the totals model:
+pulled a real shootout game's play-by-play and confirmed the official final score already
+bakes in the deciding goal, the same convention every broadcast uses, so no special-casing
+was needed. The Elo model had no published methodology to start from the way NFL's and
+NBA's did (538 never shipped a public NHL model), so it shipped as a standard Elo, swept
+against two real seasons before shipping — K_FACTOR corrected from a borrowed NBA seed of
+20 down to 8, landing on real Brier ~0.238, a modest but genuine signal, appropriately
+weaker than NBA's given hockey's well-known single-game variance. See CLAUDE.md's "NHL
+model" section for the full build and the honest list of what's still unconfirmed against
+a live market (ticker format and matchup-text phrasing are carried over from the other
+three sports' convention, not yet independently verified — no NHL market has been open to
+check against, and last season's settled markets have already rolled off Kalshi's
+~68-day settled-market window).
 
 **Why not soccer**: draws break the binary win/lose assumption baked into the whole
 recommendation pipeline (`headline_for`, side selection, `resolve_outcomes`) — Kalshi's

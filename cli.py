@@ -33,11 +33,14 @@ from data.fair_value_nfl import NflFairValueModel
 from data.fair_value_nfl_totals import NflTotalsFairValueModel
 from data.fair_value_nba import NbaFairValueModel
 from data.fair_value_nba_totals import NbaTotalsFairValueModel
+from data.fair_value_nhl import NhlFairValueModel
+from data.fair_value_nhl_totals import NhlTotalsFairValueModel
 from data.fair_value_totals import TotalsFairValueModel
 from data.games import build_clients
 from data.mlb_stats import MlbStatsClient
 from data.nfl_data import NflDataClient
 from data.nba_data import NbaDataClient
+from data.nhl_data import NhlDataClient
 from engine.loop import build_context, run_loop, run_once
 from engine.scanner import run_scan
 from kalshi.client import KalshiClient, KalshiError
@@ -84,7 +87,7 @@ def _dollars(cents_str) -> str:
 def cmd_search(args) -> None:
     settings = _settings_from(args)
     ctx = build_context(settings)
-    _client, _mlb, _nfl, _nba, fair_router, store, calibration = ctx
+    _client, _mlb, _nfl, _nba, _nhl, fair_router, store, calibration = ctx
     res = run_scan(_client, fair_router, store.load_prev_state(), settings, calibration)
 
     rows = [r for r in res.snapshot_rows if r.get("fair_prob") is not None or abs(r.get("mf_score") or 0) > 0.1]
@@ -115,12 +118,15 @@ def cmd_inspect(args) -> None:
     mlb = MlbStatsClient()
     nfl = NflDataClient()
     nba = NbaDataClient()
+    nhl = NhlDataClient()
     fair_router = FairValueRouter(
         mlb_winner=FairValueModel(mlb, settings), mlb_totals=TotalsFairValueModel(mlb, settings),
         nfl_winner=NflFairValueModel(nfl, settings=settings),
         nfl_totals=NflTotalsFairValueModel(nfl, settings),
         nba_winner=NbaFairValueModel(nba, settings=settings),
         nba_totals=NbaTotalsFairValueModel(nba, settings),
+        nhl_winner=NhlFairValueModel(nhl, settings=settings),
+        nhl_totals=NhlTotalsFairValueModel(nhl, settings),
     )
 
     m = client.get_market(args.ticker)
@@ -246,6 +252,14 @@ def cmd_results(args) -> None:
     if nba_games:
         print(f"\nNBA games {day}:")
         for g in sorted(nba_games, key=lambda g: g.state):
+            score = f"  winner: {g.winner_abbr}" if g.winner_abbr else ""
+            print(f"  {g.away_abbr:>4} @ {g.home_abbr:<4}  {g.state:<14}{score}")
+
+    nhl = NhlDataClient()
+    nhl_games = [g for g in nhl.games() if g.date_str == day]
+    if nhl_games:
+        print(f"\nNHL games {day}:")
+        for g in sorted(nhl_games, key=lambda g: g.state):
             score = f"  winner: {g.winner_abbr}" if g.winner_abbr else ""
             print(f"  {g.away_abbr:>4} @ {g.home_abbr:<4}  {g.state:<14}{score}")
 
@@ -532,7 +546,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("settle", help="grade the paper-trade ledger vs outcomes")
     s.add_argument("date", nargs="?", default=None, help="filter to games on YYYY-MM-DD")
     s.add_argument("--notify", action="store_true", help="text a summary of the results")
-    s.add_argument("--sport", default=None, choices=["mlb", "nfl", "nba"],
+    s.add_argument("--sport", default=None, choices=["mlb", "nfl", "nba", "nhl"],
                    help="grade only one sport's bets (default: all, broken out by sport)")
     s.set_defaults(func=cmd_settle)
 

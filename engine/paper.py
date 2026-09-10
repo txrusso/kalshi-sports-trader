@@ -48,6 +48,14 @@ _MONTHS = {m: i for i, m in enumerate(
 # sched_fp always None for NBA). If the same +3h-style skew exists here, it would silently
 # misfire the NBA trigger window the same way it did for NFL until that was caught -- worth a
 # manual spot check against a real broadcast tip-off time before trusting this in production.
+#
+# NHL tickers (added 2026-09-10) also carry no time-of-day segment, but data/nhl_data.py DOES
+# carry a real per-game start time (NhlGame.puck_drop_utc, from the NHL's own official API) --
+# same protection class as NFL's, so NHL joins NFL in the schedule-lookup branch below instead
+# of blindly trusting occurrence_datetime the way NBA has to. Not yet confirmed whether the
+# same +3h-style skew exists on NHL markets specifically (no NHL market has been live yet to
+# check against) -- but unlike NBA, this path is already wired to catch and log it the moment
+# one is.
 _MLB_TICKER_TIME_RE = re.compile(r"^KXMLB(?:GAME|TOTAL)-(\d{2})([A-Z]{3})(\d{2})(\d{2})(\d{2})")
 
 
@@ -108,11 +116,12 @@ def run_paper_trigger(recs: list[Recommendation], clients: dict, ledger: PaperLe
     """Paper-bet any recommended game that starts within `window_minutes` and
     hasn't been bet yet. Returns the newly placed paper bets.
 
-    `clients` is {"mlb": MlbStatsClient(), "nfl": NflDataClient(), "nba": NbaDataClient()},
-    used both to label the ledger row with a "matchup" string and -- for NFL -- to resolve
-    the real kickoff (data/games.py::match_game). Kalshi's own `occurrence_datetime`
-    (`r.game_datetime`) is only a last-resort fallback for MLB/NFL, and the ONLY option for
-    NBA (no independent kickoff source exists yet); see the module note above."""
+    `clients` is {"mlb": MlbStatsClient(), "nfl": NflDataClient(), "nba": NbaDataClient(),
+    "nhl": NhlDataClient()}, used both to label the ledger row with a "matchup" string and --
+    for NFL/NHL -- to resolve the real kickoff/puck-drop (data/games.py::match_game). Kalshi's
+    own `occurrence_datetime` (`r.game_datetime`) is only a last-resort fallback for
+    MLB/NFL/NHL, and the ONLY option for NBA (no independent kickoff source exists yet); see
+    the module note above."""
     now = now or datetime.now(timezone.utc)
     sched_cache: dict = {}
     placed: list[dict] = []
@@ -121,11 +130,12 @@ def run_paper_trigger(recs: list[Recommendation], clients: dict, ledger: PaperLe
         # Start time, in preference order (occurrence_datetime last -- it carries a
         # systematic +3h skew on MLB/NFL; see the module note above):
         #   MLB -> the ET first pitch embedded in the ticker.
-        #   NFL -> nflverse's gameday+gametime, via the schedule lookup.
+        #   NFL/NHL -> the schedule lookup (nflverse's gameday+gametime / the NHL API's
+        #              startTimeUTC).
         #   NBA -> occurrence_datetime directly (no independent source to prefer yet).
         g: Optional[Game] = None
         sched_fp = first_pitch_from_ticker(r.ticker)
-        if sched_fp is None and sport_of(r.ticker) == "nfl":
+        if sched_fp is None and sport_of(r.ticker) in ("nfl", "nhl"):
             g = _lookup_game(r.ticker, clients, sched_cache)
             sched_fp = g.game_datetime if g else None
         fp = sched_fp or r.game_datetime
@@ -155,8 +165,8 @@ def run_paper_trigger(recs: list[Recommendation], clients: dict, ledger: PaperLe
         if not in_window:
             continue                          # too early (or already started) -- normal, no log
         # Matchup label is best-effort; on any failure fall back to the headline -- the bet
-        # still records correctly, only the display label degrades. NFL already looked the
-        # game up above for its timing, so this only costs a lookup for MLB.
+        # still records correctly, only the display label degrades. NFL/NHL already looked
+        # the game up above for their timing, so this only costs a lookup for MLB/NBA.
         if g is None:
             g = _lookup_game(r.ticker, clients, sched_cache)
         matchup = f"{g.away_abbr} vs {g.home_abbr}" if g else (r.headline or r.yes_team)

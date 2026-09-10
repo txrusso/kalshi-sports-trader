@@ -14,10 +14,13 @@ from data.fair_value_nfl import NflFairValueModel
 from data.fair_value_nfl_totals import NflTotalsFairValueModel
 from data.fair_value_nba import NbaFairValueModel
 from data.fair_value_nba_totals import NbaTotalsFairValueModel
+from data.fair_value_nhl import NhlFairValueModel
+from data.fair_value_nhl_totals import NhlTotalsFairValueModel
 from data.fair_value_totals import TotalsFairValueModel
 from data.mlb_stats import MlbStatsClient
 from data.nfl_data import NflDataClient
 from data.nba_data import NbaDataClient
+from data.nhl_data import NhlDataClient
 from engine.notify import SmsNotifier, PushNotifier, format_bet_sms, format_bet_push
 from engine.paper import PaperLedger, run_paper_trigger
 from engine.scanner import run_scan
@@ -27,6 +30,7 @@ from output.reporter import render_console, write_outputs
 from signals.calibration import build_calibration
 from signals.elo_nfl import EloRatings
 from signals.elo_nba import EloRatings as NbaEloRatings
+from signals.elo_nhl import EloRatings as NhlEloRatings
 
 log = logging.getLogger("engine.loop")
 
@@ -36,8 +40,10 @@ def build_context(settings: Settings = DEFAULTS):
     mlb = MlbStatsClient()
     nfl = NflDataClient()
     nba = NbaDataClient()
+    nhl = NhlDataClient()
     elo = EloRatings(nfl)
     nba_elo = NbaEloRatings(nba)
+    nhl_elo = NhlEloRatings(nhl)
     fair_router = FairValueRouter(
         mlb_winner=FairValueModel(mlb, settings),
         mlb_totals=TotalsFairValueModel(mlb, settings),
@@ -45,6 +51,8 @@ def build_context(settings: Settings = DEFAULTS):
         nfl_totals=NflTotalsFairValueModel(nfl, settings),
         nba_winner=NbaFairValueModel(nba, nba_elo, settings),
         nba_totals=NbaTotalsFairValueModel(nba, settings),
+        nhl_winner=NhlFairValueModel(nhl, nhl_elo, settings),
+        nhl_totals=NhlTotalsFairValueModel(nhl, settings),
     )
     store = SnapshotStore()
     try:
@@ -55,7 +63,7 @@ def build_context(settings: Settings = DEFAULTS):
     except Exception as e:
         log.warning("Calibration build failed (%s); proceeding with neutral confidence.", e)
         calibration = None
-    return client, mlb, nfl, nba, fair_router, store, calibration
+    return client, mlb, nfl, nba, nhl, fair_router, store, calibration
 
 
 def resolve_bankroll(client: KalshiClient, settings: Settings) -> Settings:
@@ -81,7 +89,7 @@ def resolve_bankroll(client: KalshiClient, settings: Settings) -> Settings:
 
 def run_once(settings: Settings = DEFAULTS, ctx=None) -> list:
     standalone = ctx is None
-    client, mlb, nfl, nba, fair_router, store, calibration = ctx or build_context(settings)
+    client, mlb, nfl, nba, nhl, fair_router, store, calibration = ctx or build_context(settings)
     if standalone:
         settings = resolve_bankroll(client, settings)
 
@@ -98,7 +106,8 @@ def run_once(settings: Settings = DEFAULTS, ctx=None) -> list:
     if settings.paper_trade:
         window = settings.scan_interval_seconds / 60.0 + settings.paper_trigger_buffer_min
         ledger = PaperLedger()
-        placed = run_paper_trigger(result.recommendations, {"mlb": mlb, "nfl": nfl, "nba": nba},
+        placed = run_paper_trigger(result.recommendations,
+                                   {"mlb": mlb, "nfl": nfl, "nba": nba, "nhl": nhl},
                                    ledger, window)
         if placed:
             # The bets are already recorded to the ledger above -- announcing/texting them

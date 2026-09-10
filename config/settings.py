@@ -34,18 +34,23 @@ class Settings:
     # Loop cadence (seconds). ~20 min = balanced money-flow tracking.
     scan_interval_seconds: int = 20 * 60
 
-    # --- Market universe (MLB + NFL + NBA) ---
+    # --- Market universe (MLB + NFL + NBA + NHL) ---
     # Kalshi series tickers for game markets. Discovered/verified at runtime; these
     # are the prefixes we filter events by.
-    # KX**GAME = per-game winner markets; KX**TOTAL = total-runs/points (over/under)
-    # ladders. (KXMLB*/KXNFL*/KXNBA* futures are excluded — the fair-value model is
-    # game-based.) All sports scan in the same cycle; config/sports.py dispatches
-    # each ticker to its sport's fair-value model and calibration bucket.
+    # KX**GAME = per-game winner markets; KX**TOTAL = total-runs/points/goals
+    # (over/under) ladders. (KXMLB*/KXNFL*/KXNBA*/KXNHL* futures are excluded — the
+    # fair-value model is game-based.) All sports scan in the same cycle;
+    # config/sports.py dispatches each ticker to its sport's fair-value model and
+    # calibration bucket.
     # NBA added 2026-09-10; KXNBAGAME confirmed live (real Oct 20 2026 openers
     # already listed), KXNBATOTAL confirmed real but not yet listed this far out
     # (same as MLB/NFL totals) -- see data/nba_data.py for the model build notes.
+    # NHL added 2026-09-10; neither series is listed yet this far from the season
+    # (confirmed live) -- ticker shape confirmed via web search against real
+    # historical markets only, see data/nhl_data.py/data/fair_value_nhl.py.
     sport_series_prefixes: tuple[str, ...] = (
         "KXMLBGAME", "KXMLBTOTAL", "KXNFLGAME", "KXNFLTOTAL", "KXNBAGAME", "KXNBATOTAL",
+        "KXNHLGAME", "KXNHLTOTAL",
     )
     include_totals: bool = True           # scan over/under (total runs) markets
     totals_min_mid: float = 0.12          # only consider near-the-money O/U lines

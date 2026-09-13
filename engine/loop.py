@@ -12,6 +12,7 @@ from config.settings import EASTERN, Settings, DEFAULTS
 from data.fair_value import FairValueModel, FairValueRouter
 from data.fair_value_nfl import NflFairValueModel
 from data.fair_value_nfl_totals import NflTotalsFairValueModel
+from data.fair_value_nfl_spread import NflSpreadFairValueModel
 from data.fair_value_nba import NbaFairValueModel
 from data.fair_value_nba_totals import NbaTotalsFairValueModel
 from data.fair_value_nhl import NhlFairValueModel
@@ -49,6 +50,7 @@ def build_context(settings: Settings = DEFAULTS):
         mlb_totals=TotalsFairValueModel(mlb, settings),
         nfl_winner=NflFairValueModel(nfl, elo, settings),
         nfl_totals=NflTotalsFairValueModel(nfl, settings),
+        nfl_spread=NflSpreadFairValueModel(nfl, elo, settings),
         nba_winner=NbaFairValueModel(nba, nba_elo, settings),
         nba_totals=NbaTotalsFairValueModel(nba, settings),
         nhl_winner=NhlFairValueModel(nhl, nhl_elo, settings),

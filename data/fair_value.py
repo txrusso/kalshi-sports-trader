@@ -241,12 +241,14 @@ class FairValueRouter:
     threaded around individually."""
 
     def __init__(self, mlb_winner, mlb_totals, nfl_winner, nfl_totals,
-                nba_winner=None, nba_totals=None, nhl_winner=None, nhl_totals=None):
+                nba_winner=None, nba_totals=None, nhl_winner=None, nhl_totals=None,
+                nfl_spread=None):
         self._models = {
             ("mlb", "winner"): mlb_winner,
             ("mlb", "total"): mlb_totals,
             ("nfl", "winner"): nfl_winner,
             ("nfl", "total"): nfl_totals,
+            ("nfl", "spread"): nfl_spread,
             ("nba", "winner"): nba_winner,
             ("nba", "total"): nba_totals,
             ("nhl", "winner"): nhl_winner,

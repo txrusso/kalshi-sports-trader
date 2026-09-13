@@ -38,6 +38,16 @@ def nb_survival(k: int, mean: float, phi: float) -> float:
         cdf += math.exp(log_pmf)
     return max(0.0, min(1.0, 1.0 - cdf))
 
+
+def normal_sf(x: float, mu: float, sigma: float) -> float:
+    """P(X > x) for X ~ Normal(mu, sigma). Used by the NFL spread model
+    (data/fair_value_nfl_spread.py) to convert an Elo-implied expected point
+    margin into P(team covers a given line)."""
+    if sigma <= 0:
+        return 1.0 if mu > x else 0.0
+    z = (x - mu) / (sigma * math.sqrt(2))
+    return 0.5 * math.erfc(z)
+
 # NOTE (2026-09-01): a heavier-right-tail "blowout" mixture on the survival function was
 # built and tested here to fix the totals model's low-P(over)/high-line miscalibration
 # (season_backtest 0-10% bucket predicts ~5.6% over, hits ~36%). A MEAN-PRESERVING mixture

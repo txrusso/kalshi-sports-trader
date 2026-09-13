@@ -31,6 +31,7 @@ from config.sports import is_total
 from data.fair_value import FairValueModel, FairValueRouter
 from data.fair_value_nfl import NflFairValueModel
 from data.fair_value_nfl_totals import NflTotalsFairValueModel
+from data.fair_value_nfl_spread import NflSpreadFairValueModel
 from data.fair_value_nba import NbaFairValueModel
 from data.fair_value_nba_totals import NbaTotalsFairValueModel
 from data.fair_value_nhl import NhlFairValueModel
@@ -123,6 +124,7 @@ def cmd_inspect(args) -> None:
         mlb_winner=FairValueModel(mlb, settings), mlb_totals=TotalsFairValueModel(mlb, settings),
         nfl_winner=NflFairValueModel(nfl, settings=settings),
         nfl_totals=NflTotalsFairValueModel(nfl, settings),
+        nfl_spread=NflSpreadFairValueModel(nfl, settings=settings),
         nba_winner=NbaFairValueModel(nba, settings=settings),
         nba_totals=NbaTotalsFairValueModel(nba, settings),
         nhl_winner=NhlFairValueModel(nhl, settings=settings),

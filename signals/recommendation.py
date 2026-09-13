@@ -86,7 +86,8 @@ def _teams_from_title(title: str, suffix: str) -> Optional[tuple[str, str]]:
 
 def headline_for(ticker: str, side: str, yes_team: str, title: str,
                   away_name: str = "", home_name: str = "",
-                  yes_name: str = "", opp_name: str = "") -> str:
+                  yes_name: str = "", opp_name: str = "",
+                  line: Optional[float] = None) -> str:
     """Display-only phrasing. Rules (never change the underlying side/price for this):
       - Winner markets: "<winning team> wins vs <losing team>" -- always the team we
         think WINS, never "<team> loses", regardless of which team's own contract the
@@ -96,18 +97,34 @@ def headline_for(ticker: str, side: str, yes_team: str, title: str,
         There's no separate "Under" contract on Kalshi (one contract per line,
         YES=over/NO=under), so calling an under pick "Over" would tell the user to
         buy the opposite of what's recommended.
+      - Spread markets: each KXNFLSPREAD ticker is one team's own "wins by over
+        L" ladder rung (YES=that team covers). Betting YES: "<team> covers -<L>".
+        Betting NO (that team does NOT cover) is displayed from the OTHER team's
+        implied side instead of a negative "fails to cover" framing -- the same
+        "never say a team loses" spirit as winner markets -- so it reads
+        "<opponent> covers +<L>", i.e. standard "+3.5 underdog" spread notation.
 
-    away_name/home_name (totals) and yes_name/opp_name (winner) come from
+    away_name/home_name (totals) and yes_name/opp_name (winner, spread) come from
     whichever sport's fair-value model produced `fv` (data/fair_value.py /
     data/fair_value_totals.py for MLB via the matched MLB game; data/
-    fair_value_nfl.py / data/fair_value_nfl_totals.py for NFL via its
-    rules_primary matchup text) -- the real source of team names either way.
-    Kalshi's market `title` is per-contract text like "Over 5.5 runs scored" /
-    "Colorado wins" (MLB) or "Full Game: over 58.5 points scored?" / "New York G
-    wins" (NFL), NOT a game-level "A vs B ..." string, so _teams_from_title
-    below almost never matches; it's kept only as a last-resort fallback for old
-    replayed rows that predate these fields (see backtest/evaluate.py::_label_for).
+    fair_value_nfl.py / data/fair_value_nfl_totals.py / data/fair_value_nfl_spread.py
+    for NFL via its rules_primary matchup text) -- the real source of team names
+    either way. Kalshi's market `title` is per-contract text like "Over 5.5 runs
+    scored" / "Colorado wins" (MLB) or "Full Game: over 58.5 points scored?" /
+    "New York G wins" (NFL), NOT a game-level "A vs B ..." string, so
+    _teams_from_title below almost never matches; it's kept only as a
+    last-resort fallback for old replayed rows that predate these fields (see
+    backtest/evaluate.py::_label_for).
     """
+    if market_kind(ticker) == "spread":
+        if yes_name and opp_name and line is not None:
+            line_str = f"{line:g}"
+            if side == "YES":
+                return f"{yes_name} covers -{line_str}"
+            return f"{opp_name} covers +{line_str}"
+        team = yes_team if side == "YES" else "the opponent"  # nothing parsed; safe fallback
+        return f"{team} spread bet"
+
     if is_total(ticker):
         y = (yes_team or "").lower()
         line = y.replace("over", "").replace("runs scored", "").replace(
@@ -219,7 +236,8 @@ def build_recommendation(q: MarketQuote, mf: MoneyFlow, fv: FairValue,
     headline = headline_for(
         q.ticker, side, q.yes_sub_title, q.title,
         away_name=fv.detail.get("away_name", ""), home_name=fv.detail.get("home_name", ""),
-        yes_name=fv.detail.get("yes_name", ""), opp_name=fv.detail.get("opp_name", ""))
+        yes_name=fv.detail.get("yes_name", ""), opp_name=fv.detail.get("opp_name", ""),
+        line=fv.detail.get("line"))
     rationale = _rationale(headline, mf, fv, edge_cents, conflict, q, cal_mult, entry_price)
 
     return Recommendation(

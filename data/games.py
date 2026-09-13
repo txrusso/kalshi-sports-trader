@@ -14,11 +14,12 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
-from config.sports import is_total, sport_of
+from config.sports import is_total, market_kind, sport_of
 from data.fair_value import parse_ticker as parse_mlb_ticker
 from data.fair_value_totals import parse_total_ticker as parse_mlb_total_ticker
 from data.fair_value_nfl import parse_ticker as parse_nfl_ticker
 from data.fair_value_nfl_totals import parse_total_ticker as parse_nfl_total_ticker
+from data.fair_value_nfl_spread import parse_spread_ticker as parse_nfl_spread_ticker
 from data.fair_value_nba import parse_ticker as parse_nba_ticker
 from data.fair_value_nba_totals import parse_total_ticker as parse_nba_total_ticker
 from data.fair_value_nhl import parse_ticker as parse_nhl_ticker
@@ -38,6 +39,10 @@ class Game:
     state: str                           # "Preview" / "Live" / "Final"
     winner_abbr: Optional[str]
     total_score: Optional[float]         # runs or points, when Final
+    home_margin: Optional[float] = None  # home_score - away_score, when Final -- only
+                                          # populated for NFL so far (spread's the only
+                                          # sport that needs it); None is harmless for
+                                          # the other sports' winner/total resolution
 
 
 def build_clients() -> dict:
@@ -65,11 +70,19 @@ def _match_mlb(ticker: str, mlb: MlbStatsClient, sched_cache: dict) -> Optional[
 
 
 def _match_nfl(ticker: str, nfl: NflDataClient) -> Optional[Game]:
-    if is_total(ticker):
+    kind = market_kind(ticker)
+    if kind == "total":
         pt = parse_nfl_total_ticker(ticker)
         if not pt:
             return None
         g = nfl.find_game(pt.date_str, pt.away_abbr, pt.home_abbr)
+    elif kind == "spread":
+        pt = parse_nfl_spread_ticker(ticker)
+        if not pt:
+            return None
+        away = pt.opponent if pt.yes_is_home else pt.yes_team
+        home = pt.yes_team if pt.yes_is_home else pt.opponent
+        g = nfl.find_game(pt.date_str, away, home)
     else:
         pt = parse_nfl_ticker(ticker)
         if not pt:
@@ -79,8 +92,10 @@ def _match_nfl(ticker: str, nfl: NflDataClient) -> Optional[Game]:
         g = nfl.find_game(pt.date_str, away, home)
     if not g:
         return None
+    home_margin = (g.home_score - g.away_score
+                  if g.home_score is not None and g.away_score is not None else None)
     return Game("nfl", g.away_abbr, g.home_abbr, g.kickoff_utc, g.state,
-                g.winner_abbr, g.total_points)
+                g.winner_abbr, g.total_points, home_margin)
 
 
 def _match_nba(ticker: str, nba: NbaDataClient) -> Optional[Game]:
@@ -151,8 +166,8 @@ def match_game(ticker: str, clients: dict, sched_cache: dict) -> Optional[Game]:
 
 
 def resolve_outcomes(tickers: set[str], clients: dict) -> dict[str, bool]:
-    """ticker -> did YES resolve true? (winner: YES team won; total: over hit).
-    Skips games not yet Final."""
+    """ticker -> did YES resolve true? (winner: YES team won; total: over hit;
+    spread: YES team covered its own line). Skips games not yet Final."""
     out: dict[str, bool] = {}
     sched_cache: dict = {}
     for tk in tickers:
@@ -160,7 +175,17 @@ def resolve_outcomes(tickers: set[str], clients: dict) -> dict[str, bool]:
         if not g or g.state != "Final":
             continue
         sport = sport_of(tk)
-        if is_total(tk):
+        kind = market_kind(tk)
+        if kind == "spread":
+            # Only NFL has a spread model/parser so far.
+            if sport != "nfl" or g.home_margin is None:
+                continue
+            pt = parse_nfl_spread_ticker(tk)
+            if not pt:
+                continue
+            team_margin = g.home_margin if pt.yes_is_home else -g.home_margin
+            out[tk] = (team_margin > pt.line)
+        elif kind == "total":
             if g.total_score is None:
                 continue
             line = _TOTAL_PARSERS[sport](tk)

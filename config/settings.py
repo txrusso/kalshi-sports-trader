@@ -48,13 +48,20 @@ class Settings:
     # NHL added 2026-09-10; neither series is listed yet this far from the season
     # (confirmed live) -- ticker shape confirmed via web search against real
     # historical markets only, see data/nhl_data.py/data/fair_value_nhl.py.
+    # NFL spread added 2026-09-13 (KXNFLSPREAD, confirmed live) -- one ladder of
+    # "team wins by over K.5" rungs PER TEAM per game (unlike totals' one shared
+    # ladder), so an event costs up to ~24 markets, worse than MLB totals' 8-10 --
+    # see spread_min_mid/max_mid below, and the deep-scan-budget note above.
     sport_series_prefixes: tuple[str, ...] = (
-        "KXMLBGAME", "KXMLBTOTAL", "KXNFLGAME", "KXNFLTOTAL", "KXNBAGAME", "KXNBATOTAL",
-        "KXNHLGAME", "KXNHLTOTAL",
+        "KXMLBGAME", "KXMLBTOTAL", "KXNFLGAME", "KXNFLTOTAL", "KXNFLSPREAD",
+        "KXNBAGAME", "KXNBATOTAL", "KXNHLGAME", "KXNHLTOTAL",
     )
     include_totals: bool = True           # scan over/under (total runs) markets
     totals_min_mid: float = 0.12          # only consider near-the-money O/U lines
     totals_max_mid: float = 0.88          #   (skip deep ITM/OTM ladder rungs)
+    include_spreads: bool = True          # scan NFL point-spread markets
+    spread_min_mid: float = 0.12          # only consider near-the-money spread rungs
+    spread_max_mid: float = 0.88          #   (same rationale as totals_min_mid/max_mid)
     market_status: str = "open"          # only scan open markets
     min_market_volume: int = 50          # ignore illiquid markets (contracts traded)
     min_open_interest: int = 50

@@ -58,6 +58,11 @@ class EloRatings:
         # team -> [(date_str, season, rating_before_this_game, rating_after_this_game)]
         self._history: dict[str, list[tuple]] = {}
         self._built = False
+        # (r_home_before, r_away_before, actual_margin) for every completed game,
+        # collected during _build() -- lets the spread model (data/fair_value_nfl_spread.py)
+        # regress margin-of-victory on pre-game Elo diff against real history without
+        # re-deriving ratings itself. See margin_samples().
+        self._margin_samples: list[tuple[float, float, int]] = []
 
     def _build(self) -> None:
         if self._built:
@@ -91,9 +96,17 @@ class EloRatings:
             hist[g.home_abbr].append((g.date_str, g.season, r_home, r_home_after))
             hist[g.away_abbr].append((g.date_str, g.season, r_away, r_away_after))
             ratings[g.home_abbr], ratings[g.away_abbr] = r_home_after, r_away_after
+            self._margin_samples.append((r_home, r_away, margin))
 
         self._history = dict(hist)
         self._built = True
+
+    def margin_samples(self) -> list[tuple[float, float, int]]:
+        """(r_home_before, r_away_before, actual_margin=home_score-away_score) for
+        every completed game -- the training set for the spread model's Elo-diff ->
+        margin regression (data/fair_value_nfl_spread.py)."""
+        self._build()
+        return self._margin_samples
 
     def rating_before(self, team: str, date_str: str) -> float:
         """Team's rating entering a game on `date_str` (YYYY-MM-DD): the rating

@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from config.settings import Settings, DEFAULTS
-from config.sports import is_total, sport_of
+from config.sports import is_spread, is_total, market_kind, sport_of
 from data.fair_value import FairValueRouter
 from kalshi.client import KalshiClient
 from kalshi.normalize import MarketQuote, OrderBook, parse_market, parse_trades
@@ -31,6 +31,8 @@ def _candidate_markets(client: KalshiClient, settings: Settings) -> list[MarketQ
     for prefix in settings.sport_series_prefixes:
         if is_total(prefix) and not settings.include_totals:
             continue
+        if is_spread(prefix) and not settings.include_spreads:
+            continue
         try:
             for m in client.get_markets(series_ticker=prefix, status=settings.market_status):
                 q = parse_market(m)
@@ -39,6 +41,13 @@ def _candidate_markets(client: KalshiClient, settings: Settings) -> list[MarketQ
                 # Totals: keep only near-the-money O/U lines (skip deep ITM/OTM rungs).
                 if is_total(q.ticker):
                     if not (settings.totals_min_mid <= q.mid <= settings.totals_max_mid):
+                        continue
+                # Spread: same idea, but more important -- each event has up to
+                # ~24 rungs (12 lines x 2 teams), far more than totals' 8-10, so
+                # skipping the deep ITM/OTM rungs matters even more here for the
+                # deep-scan budget (settings.max_deep_markets).
+                if is_spread(q.ticker):
+                    if not (settings.spread_min_mid <= q.mid <= settings.spread_max_mid):
                         continue
                 seen[q.ticker] = q
         except Exception as e:  # one bad series shouldn't kill the cycle
@@ -103,12 +112,15 @@ def run_scan(client: KalshiClient, fair_router: FairValueRouter,
     # Pass 2: money flow + fair value + recommendation.
     for tk, d in fetched.items():
         q, ob, trades = d["q"], d["ob"], d["trades"]
-        # Cross-market pairing applies ONLY to winner markets (team A vs team B).
-        # Totals lines share an event but aren't opposites, so no sibling — the
-        # within-market flow already captures over-buyers vs under-buyers.
+        # Cross-market pairing applies ONLY to winner markets (team A vs team B,
+        # a clean 2-sided complementary pair). Totals AND spread lines share an
+        # event across many rungs (spread: up to ~24, one team+line per market)
+        # that aren't simple opposites of each other, so no sibling pairing for
+        # either — the within-market flow already captures the two sides of that
+        # one line/rung.
         sibling_yes_d = sibling_yes_wt = None
-        if not is_total(tk):
-            siblings = [t for t in by_event.get(q.event_ticker, []) if t != tk and not is_total(t)]
+        if market_kind(tk) == "winner":
+            siblings = [t for t in by_event.get(q.event_ticker, []) if t != tk and market_kind(t) == "winner"]
             if siblings:
                 sibling_yes_d = sum(fetched[s]["yes_d"] for s in siblings)
                 sibling_yes_wt = sum(fetched[s]["yes_wt"] for s in siblings)

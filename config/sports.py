@@ -10,12 +10,13 @@ here once; every caller picks it up automatically.
 """
 from __future__ import annotations
 
-# prefix -> (sport, market kind: "winner" | "total")
+# prefix -> (sport, market kind: "winner" | "total" | "spread")
 SPORT_PREFIXES: dict[str, tuple[str, str]] = {
     "KXMLBGAME": ("mlb", "winner"),
     "KXMLBTOTAL": ("mlb", "total"),
     "KXNFLGAME": ("nfl", "winner"),
     "KXNFLTOTAL": ("nfl", "total"),
+    "KXNFLSPREAD": ("nfl", "spread"),
     "KXNBAGAME": ("nba", "winner"),
     "KXNBATOTAL": ("nba", "total"),
     "KXNHLGAME": ("nhl", "winner"),
@@ -41,6 +42,10 @@ def market_kind(ticker: str) -> str:
 
 def is_total(ticker: str) -> bool:
     return market_kind(ticker) == "total"
+
+
+def is_spread(ticker: str) -> bool:
+    return market_kind(ticker) == "spread"
 
 
 def calibration_bucket(ticker: str) -> str:

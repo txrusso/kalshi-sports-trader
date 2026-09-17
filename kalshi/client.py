@@ -1,7 +1,9 @@
-"""Signed HTTP client for the Kalshi trade API (read-only usage here).
+"""Signed HTTP client for the Kalshi trade API.
 
-This client only calls GET endpoints. It never places, cancels, or modifies
-orders — the agent is recommend-only by design.
+Mostly GET endpoints for market/account data. `create_order` is the one write
+endpoint, added 2026-09-17 to back live auto-execution (engine/execution.py,
+engine/live.py) — see those modules for the safety gating around it. This
+client itself does no gating; it just sends what it's given.
 """
 from __future__ import annotations
 
@@ -65,6 +67,62 @@ class KalshiClient:
             raise KalshiError(f"HTTP {resp.status_code} on {endpoint}: {resp.text[:400]}")
         raise KalshiError(f"Exhausted retries on {endpoint}")
 
+    def _post(self, endpoint: str, body: dict, retries: int = 2) -> dict[str, Any]:
+        """POST {base}{endpoint} with a JSON body, signed the same way as GET
+        (Kalshi signs timestamp+METHOD+path only, never the body).
+
+        Retried on network/5xx/429 like `_get`. Safe to retry an order POST
+        specifically because callers pass a stable `client_order_id` — Kalshi
+        dedups on it, so a retry after a timeout returns the original order
+        instead of creating a second one."""
+        path = self.path_prefix + endpoint
+        url = self.base + endpoint
+        for attempt in range(retries + 1):
+            self._throttle()
+            headers = build_headers(self.creds.key_id, self.creds.private_key, "POST", path)
+            try:
+                resp = self.session.post(url, headers=headers, json=body, timeout=20)
+            except requests.RequestException as e:
+                if attempt < retries:
+                    time.sleep(1.5 * (attempt + 1))
+                    continue
+                raise KalshiError(f"Network error on {endpoint}: {e}") from e
+
+            if resp.status_code in (200, 201):
+                return resp.json()
+            if resp.status_code in (429, 500, 502, 503, 504) and attempt < retries:
+                wait = 2.0 * (attempt + 1)
+                log.warning("HTTP %s on %s; retrying in %.1fs", resp.status_code, endpoint, wait)
+                time.sleep(wait)
+                continue
+            raise KalshiError(f"HTTP {resp.status_code} on {endpoint}: {resp.text[:400]}")
+        raise KalshiError(f"Exhausted retries on {endpoint}")
+
+    def _delete(self, endpoint: str, retries: int = 2) -> dict[str, Any]:
+        """DELETE {base}{endpoint}, signed like GET/POST."""
+        path = self.path_prefix + endpoint
+        url = self.base + endpoint
+        for attempt in range(retries + 1):
+            self._throttle()
+            headers = build_headers(self.creds.key_id, self.creds.private_key, "DELETE", path)
+            try:
+                resp = self.session.delete(url, headers=headers, timeout=20)
+            except requests.RequestException as e:
+                if attempt < retries:
+                    time.sleep(1.5 * (attempt + 1))
+                    continue
+                raise KalshiError(f"Network error on {endpoint}: {e}") from e
+
+            if resp.status_code in (200, 201, 204):
+                return resp.json() if resp.content else {}
+            if resp.status_code in (429, 500, 502, 503, 504) and attempt < retries:
+                wait = 2.0 * (attempt + 1)
+                log.warning("HTTP %s on %s; retrying in %.1fs", resp.status_code, endpoint, wait)
+                time.sleep(wait)
+                continue
+            raise KalshiError(f"HTTP {resp.status_code} on {endpoint}: {resp.text[:400]}")
+        raise KalshiError(f"Exhausted retries on {endpoint}")
+
     def _paginate(self, endpoint: str, params: dict, key: str, max_pages: int = 40) -> Iterator[dict]:
         params = dict(params)
         pages = 0
@@ -115,6 +173,55 @@ class KalshiClient:
     def get_trades(self, ticker: str, limit: int = 100) -> list[dict]:
         data = self._get("/markets/trades", {"ticker": ticker, "limit": limit})
         return data.get("trades", []) or []
+
+    def create_order(self, ticker: str, side: str, action: str, count: int,
+                     limit_price: float, client_order_id: str,
+                     time_in_force: str = "good_till_canceled",
+                     self_trade_prevention_type: str = "taker_at_cross") -> dict:
+        """POST /portfolio/events/orders (v2) — places a REAL limit order.
+
+        Kalshi deprecated the old /portfolio/orders endpoint (confirmed 2026-09-17,
+        HTTP 410 "deprecated_v1_order_endpoint") in favor of this one, which quotes
+        EVERYTHING from the YES leg -- there is no separate NO leg in this endpoint's
+        schema at all. Verbatim from the `side` field's own description (both
+        create-order-v2 and batch-create-orders-v2 docs, same wording):
+            "Side of the book for an order or trade. For event markets, this refers
+            to the YES leg only: `bid` means buy YES, `ask` means sell YES. (Selling
+            YES is economically equivalent to buying NO at `1 - price`, but this
+            endpoint quotes everything from the YES side.)"
+        That is the exact, textual conversion rule this method applies for side="no":
+        book_side="ask", price=(1 - limit_price). This mirrors Kalshi's own legacy
+        action/side -> outcome_side/book_side table (buy no -> book_side=ask) and is
+        internally self-consistent with a resting order's fill behavior (a deeply
+        unattractive NO limit, e.g. buy-no-at-2c when NO trades near 85c, becomes a
+        deeply unattractive YES ask at 98c when YES trades near 12c -- same distance
+        from market on both sides). Smoke-tested live 2026-09-17 for the YES side
+        (1 contract, rested unfilled, canceled cleanly); the NO-side conversion
+        itself should get the same live rest-then-cancel check before being trusted
+        unattended overnight -- see CLAUDE.md's "Live order execution" section.
+        """
+        if side not in ("yes", "no"):
+            raise ValueError(f"invalid side {side!r}")
+        if action != "buy":
+            raise NotImplementedError(f"action={action!r} not implemented for the v2 order "
+                                      f"endpoint (only 'buy' is verified/wired).")
+        book_side = "bid" if side == "yes" else "ask"
+        v2_price = limit_price if side == "yes" else (1.0 - limit_price)
+        body: dict[str, Any] = {
+            "ticker": ticker,
+            "client_order_id": client_order_id,
+            "side": book_side,
+            "count": f"{count:.2f}",
+            "price": f"{v2_price:.2f}",
+            "time_in_force": time_in_force,
+            "self_trade_prevention_type": self_trade_prevention_type,
+        }
+        return self._post("/portfolio/events/orders", body)
+
+    def cancel_order(self, order_id: str) -> dict:
+        """DELETE /portfolio/events/orders/{order_id} (v2) — cancels a resting
+        order (any unfilled remainder). Already-filled quantity stays filled."""
+        return self._delete(f"/portfolio/events/orders/{order_id}")
 
     # --- read-only portfolio endpoints (no execution) ---
     def get_positions(self) -> dict:

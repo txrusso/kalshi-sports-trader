@@ -22,7 +22,9 @@ from data.mlb_stats import MlbStatsClient
 from data.nfl_data import NflDataClient
 from data.nba_data import NbaDataClient
 from data.nhl_data import NhlDataClient
-from engine.notify import SmsNotifier, PushNotifier, format_bet_sms, format_bet_push
+from engine.notify import (SmsNotifier, PushNotifier, format_bet_sms, format_bet_push,
+                          format_order_placed_sms, format_order_placed_push)
+from engine.live import LiveLedger, run_live_trigger
 from engine.paper import PaperLedger, run_paper_trigger
 from engine.scanner import run_scan
 from engine.snapshot import SnapshotStore
@@ -104,9 +106,44 @@ def run_once(settings: Settings = DEFAULTS, ctx=None) -> list:
 
     print(render_console(result.recommendations, result.scanned, result.deep_scanned))
 
+    # Both triggers fire on the same last-cycle-before-first-pitch window.
+    window = settings.scan_interval_seconds / 60.0 + settings.paper_trigger_buffer_min
+
+    # Live trigger: submit REAL orders through the Kalshi API. No confirmation
+    # step -- see engine/live.py for exactly what is and isn't guarded.
+    if settings.live_trade:
+        live_ledger = LiveLedger()
+        live_placed = run_live_trigger(result.recommendations,
+                                       {"mlb": mlb, "nfl": nfl, "nba": nba, "nhl": nhl},
+                                       live_ledger, client, settings, window)
+        if live_placed:
+            try:
+                print(f"\n>> LIVE ORDER {len(live_placed)} placed "
+                     f"(recorded to output/live_ledger.jsonl):")
+                for b in live_placed:
+                    print(f"   {b['side']:>3} {b['label']:<22} @ {b['entry_price']:.2f}  "
+                         f"order {b.get('order_id')} ({b.get('order_status')})")
+            except Exception:
+                log.exception("Failed to print live-order announcement (orders are still recorded).")
+            notifier = SmsNotifier()
+            pusher = PushNotifier()
+            for b in live_placed:
+                try:
+                    pusher.send(format_order_placed_push(b))
+                except Exception:
+                    log.exception("Push alert crashed for live order %r (order still placed).",
+                                 b.get("label"))
+                try:
+                    sent = notifier.send(format_order_placed_sms(b))
+                    if not sent:
+                        log.warning("SMS not sent for live order %r -- check notify_config.txt.",
+                                   b.get("label"))
+                except Exception:
+                    log.exception("Text alert crashed for live order %r (order still placed).",
+                                 b.get("label"))
+
     # Paper-trade trigger: bet each game on the last cycle before its first pitch.
     if settings.paper_trade:
-        window = settings.scan_interval_seconds / 60.0 + settings.paper_trigger_buffer_min
         ledger = PaperLedger()
         placed = run_paper_trigger(result.recommendations,
                                    {"mlb": mlb, "nfl": nfl, "nba": nba, "nhl": nhl},

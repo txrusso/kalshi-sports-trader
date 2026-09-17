@@ -1,7 +1,10 @@
 """Central configuration: endpoints, loop cadence, and risk / signal thresholds.
 
-Recommend-only mode: this agent NEVER places orders. It scans markets, scores
-them, and writes ranked recommendations. All 'sizing' numbers are advisory only.
+By default this agent is recommend-only: it scans markets, scores them, and
+writes ranked recommendations, and all 'sizing' numbers are advisory only.
+Setting `live_trade=True` (via `loop --live`) switches the T-minus-start
+trigger from paper-recording to actually submitting orders through the Kalshi
+API — see engine/live.py for what that does and does not guard against.
 """
 from __future__ import annotations
 
@@ -176,6 +179,9 @@ class Settings:
     # --- Trade policy ---
     pregame_only: bool = True             # only recommend games in "Preview" (no live/final)
     paper_trade: bool = False             # (loop) paper-bet each game near its first pitch
+    live_trade: bool = False              # (loop --live) submit REAL orders near first pitch --
+                                          # see engine/live.py. No confirmation step; gated only
+                                          # by max_order_contracts/max_order_cost_usd below.
     paper_trigger_buffer_min: float = 15.0 # extra minutes on the trigger window (vs interval)
     # Changed 2026-08-30 (was 3.0): with a 30-min scan interval, a 3-min buffer meant
     # a 33-min trigger window -- worst case (cycle lands just past the window) the next

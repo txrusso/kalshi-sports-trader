@@ -1,20 +1,26 @@
-"""Order preview + validation, and a GATED submit path.
+"""Order preview + live submission.
 
-Design boundary (deliberate):
-  * preview_order() is fully implemented. It is READ-ONLY: it validates an order
-    against price/size caps, market status, and account balance, and renders a
-    human-readable summary. Use it freely to see exactly what would be sent.
-  * submit_order() does NOT place live orders in this build. Live money-order
-    execution is intentionally not implemented here — the agent is recommend-only
-    and the operator (you) owns the trigger. It raises ExecutionDisabled with
-    instructions instead.
+  * preview_order() validates an order against price/size caps, market status,
+    and account balance, and renders a human-readable summary. Read-only.
+  * submit_order() places a REAL order (live or demo, per Settings.use_demo).
+    It always re-runs preview_order()'s checks first and refuses to submit if
+    any fail — those per-order caps (engine/execution.py's `max_order_contracts`
+    / `max_order_cost_usd` in config/settings.py) are the only gate on this
+    path; there is no daily loss cap, position-count cap, or confirmation
+    step. That's a deliberate choice made by the user 2026-09-17.
 
-If you want live placement, implement it yourself in a module you control (see
-`ENABLING LIVE ORDERS` at the bottom) — Kalshi's order endpoint and the required
-request signing are documented there so you can wire it up deliberately.
+Called from two places:
+  * `cli.py place --confirm` — a manual, one-off order you type in yourself.
+  * `engine/live.py` — the automatic path, invoked by the loop's T-minus
+    trigger (Settings.live_trade / `loop --live`) with no human step.
+
+Pass a stable `client_order_id` (see kalshi/client.py's create_order) so a
+retried submission after a network hiccup lands on the original order instead
+of duplicating it.
 """
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -24,7 +30,7 @@ from kalshi.normalize import parse_market
 
 
 class ExecutionDisabled(RuntimeError):
-    """Raised when a live order submission is attempted but not enabled."""
+    """Raised when a live order submission fails preview_order()'s safety checks."""
 
 
 @dataclass
@@ -44,6 +50,14 @@ class Preview:
     def render(self) -> str:
         head = "ORDER PREVIEW (dry run — nothing sent)"
         return "\n".join([head, "=" * len(head), *self.lines])
+
+
+@dataclass
+class OrderResult:
+    order_id: Optional[str]
+    status: Optional[str]
+    client_order_id: str
+    raw: dict
 
 
 def preview_order(client: KalshiClient, req: OrderRequest, settings: Settings = DEFAULTS) -> Preview:
@@ -101,25 +115,43 @@ def preview_order(client: KalshiClient, req: OrderRequest, settings: Settings = 
     return Preview(ok=ok, lines=lines)
 
 
-def submit_order(client: KalshiClient, req: OrderRequest, settings: Settings = DEFAULTS):
-    """Live submission is intentionally not enabled in this build."""
-    raise ExecutionDisabled(
-        "Live order placement is not implemented in this agent. It is recommend-only. "
-        "Use the preview to see the exact order, then place it yourself in the Kalshi "
-        "app/UI, or wire up your own execution module (see engine/execution.py header)."
+def submit_order(client: KalshiClient, req: OrderRequest, settings: Settings = DEFAULTS,
+                  client_order_id: Optional[str] = None) -> OrderResult:
+    """Places a REAL order. Raises ExecutionDisabled if preview_order() finds
+    any problem (bad side/action/count, price out of range, over a cap,
+    market not tradeable, or insufficient balance) — nothing is sent in that
+    case. Raises KalshiError on a network/API failure during submission.
+
+    `client_order_id` should be stable per intended order (not random) when
+    the caller might retry — e.g. engine/live.py derives it from the game's
+    event key so a crash-and-restart between "order sent" and "recorded"
+    can't double-place the same bet.
+    """
+    preview = preview_order(client, req, settings)
+    if not preview.ok:
+        raise ExecutionDisabled("Order failed a safety check:\n" + preview.render())
+
+    coid = client_order_id or str(uuid.uuid4())
+    raw = client.create_order(
+        ticker=req.ticker, side=req.side, action=req.action,
+        count=req.count, limit_price=req.limit_price, client_order_id=coid,
     )
-
-
-# --------------------------------------------------------------------------- #
-# ENABLING LIVE ORDERS (do this yourself, deliberately)
-# --------------------------------------------------------------------------- #
-# Kalshi places orders via:
-#     POST /trade-api/v2/portfolio/orders
-# Body (limit buy example):
-#     {"ticker": ..., "client_order_id": <uuid4>, "side": "yes"|"no",
-#      "action": "buy"|"sell", "count": <int>, "type": "limit",
-#      "yes_price": <1..99>}   # or "no_price" for the NO side
-# Auth: the SAME signing already in kalshi/auth.build_headers works for POST
-#   (Kalshi signs timestamp+METHOD+path only, not the body). Send the JSON body
-#   with the signed headers. Always pass a unique client_order_id so retries can't
-#   double-submit. Start on the demo API (--demo) with tiny size.
+    # v2 create-order response is flat -- {order_id, client_order_id, fill_count,
+    # remaining_count, ts_ms} -- and carries no "status" field (unlike the old,
+    # now-deprecated /portfolio/orders response this was originally written against).
+    # Derive a status label from fill_count/remaining_count instead of guessing at one.
+    try:
+        filled = float(raw.get("fill_count") or 0)
+        remaining = float(raw.get("remaining_count") or 0)
+    except (TypeError, ValueError):
+        filled = remaining = None
+    if filled is None:
+        status = None
+    elif filled <= 0:
+        status = "resting"
+    elif remaining <= 0:
+        status = "filled"
+    else:
+        status = "partially_filled"
+    return OrderResult(order_id=raw.get("order_id"), status=status,
+                       client_order_id=coid, raw=raw)

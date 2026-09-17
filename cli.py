@@ -1,7 +1,7 @@
 """Kalshi MLB agent — terminal CLI.
 
 Command-driven interface over the money-flow engine. Read/analysis commands run
-end-to-end; `place` is a guarded, user-run action (see below).
+end-to-end; `place` and `loop --live` submit real orders (see below).
 
     py -3 cli.py search              # scan markets, show money-flow reads
     py -3 cli.py rank                # ranked, actionable recommendations
@@ -11,8 +11,9 @@ end-to-end; `place` is a guarded, user-run action (see below).
     py -3 cli.py orders              # resting orders
     py -3 cli.py results [YYYY-MM-DD]# game outcomes for a date
     py -3 cli.py backtest [--since D]# validate the signal vs outcomes
-    py -3 cli.py loop                # continuous autonomous loop
-    py -3 cli.py place ...           # PREVIEW an order (see `place --help`)
+    py -3 cli.py loop                # continuous autonomous loop (recommend-only by default)
+    py -3 cli.py loop --live         # LIVE: auto-submit real orders, no confirmation step
+    py -3 cli.py place ...           # PREVIEW an order, or submit one with --confirm
 
 Every command accepts --allow-live to include in-progress games (default: pregame only).
 """
@@ -339,6 +340,14 @@ def cmd_loop(args) -> None:
         settings = replace(settings, scan_interval_seconds=args.interval)
     if args.paper:
         settings = replace(settings, paper_trade=True)
+    if args.live:
+        settings = replace(settings, live_trade=True)
+        print("\n" + "=" * 70)
+        print("LIVE TRADING ENABLED — this will submit REAL orders with REAL money.")
+        print(f"Environment: {'DEMO' if settings.use_demo else 'PRODUCTION'}")
+        print(f"Per-order caps: <= {settings.max_order_contracts} contracts, "
+             f"<= ${settings.max_order_cost_usd:,.0f} cost. No other limit.")
+        print("=" * 70 + "\n")
     run_loop(settings)
 
 
@@ -493,6 +502,13 @@ def cmd_place(args) -> None:
         print(f"\nLive execution is disabled: {e}")
 
 
+def cmd_cancel(args) -> None:
+    settings = _settings_from(args)
+    client = KalshiClient(settings)
+    result = client.cancel_order(args.order_id)
+    print(f"CANCELED {args.order_id}: {result}")
+
+
 # --------------------------------------------------------------------------- #
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="kalshi", description="Kalshi MLB money-flow agent")
@@ -543,6 +559,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--interval", type=int, default=None, help="seconds between scans")
     s.add_argument("--paper", action="store_true",
                    help="paper-bet each game on the last cycle before first pitch")
+    s.add_argument("--live", action="store_true",
+                   help="LIVE: automatically submit real orders (real money, no confirmation) "
+                        "on the last cycle before each game starts")
     s.set_defaults(func=cmd_loop)
 
     s = sub.add_parser("settle", help="grade the paper-trade ledger vs outcomes")
@@ -567,6 +586,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--price", type=float, required=True, help="limit price in dollars (0-1)")
     s.add_argument("--confirm", action="store_true", help="actually submit (you run this)")
     s.set_defaults(func=cmd_place)
+
+    s = sub.add_parser("cancel", help="cancel a resting order by id")
+    s.add_argument("order_id")
+    s.set_defaults(func=cmd_cancel)
     return p
 
 

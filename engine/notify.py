@@ -1,8 +1,13 @@
 """Text-message alerts via a carrier email-to-SMS gateway (SMTP).
 
-When a bet triggers, this texts the user so they can place it themselves on the
-Kalshi phone app. It ONLY notifies the user about their own bets — it never
-places, confirms, or submits any order.
+Two families of alert live here:
+  * format_bet_sms / format_bet_push — a still-to-place order slip, for the
+    recommend-only paper-trade path (engine/paper.py). Tells the user what to
+    place; this module never submits anything itself.
+  * format_order_placed_sms / format_order_placed_push — a past-tense receipt
+    for the live auto-execution path (engine/live.py). The order has ALREADY
+    been submitted via the Kalshi API by the time this fires; these just
+    report what happened (order id/status), they don't gate or confirm it.
 
 Needs an SMTP sender account (a Gmail App Password works well). Config is read
 from notify_config.txt (gitignored). If it's missing or incomplete, alerts are
@@ -158,6 +163,49 @@ def format_bet_push(bet: dict) -> dict:
         "body": "\n".join(l for l in lines if l),
         "url": kalshi_market_url(bet.get("ticker", "")),
         "tags": "moneybag",
+        "priority": "high",
+    }
+
+
+def format_order_placed_sms(bet: dict) -> str:
+    """Compact receipt for a LIVE order the agent already submitted (contrast
+    with format_bet_sms's still-to-place slip)."""
+    cost_cents = round(bet["entry_price"] * 100)
+    wager = bet.get("wager_usd")
+    if wager is None:
+        wager = round(bet["entry_price"] * (bet.get("contracts") or 0), 2)
+    return (f"KALSHI ORDER PLACED: {bet['label']} @ {cost_cents}c, ${wager:.2f} "
+           f"(order {bet.get('order_id') or '?'}, {bet.get('order_status') or 'submitted'})")
+
+
+def format_order_placed_push(bet: dict) -> dict:
+    """Push receipt for a LIVE order the agent already submitted through the
+    Kalshi API — past tense, includes order id/status. Contrast with
+    format_bet_push, which is a still-to-place slip for the human to act on."""
+    price_c = round(bet["entry_price"] * 100)
+    contracts = bet.get("contracts") or 0
+    wager = bet.get("wager_usd")
+    if wager is None:
+        wager = round(bet["entry_price"] * contracts, 2)
+    side = str(bet.get("side", "")).upper()
+    status = bet.get("order_status") or "submitted"
+    lines = [
+        f"BOUGHT {contracts} x {side} @ {price_c}c  (~${wager:.2f})  status={status}",
+        bet.get("ticker", ""),
+        f"order {bet.get('order_id') or '?'}",
+    ]
+    extra = []
+    if bet.get("edge_cents") is not None:
+        extra.append(f"edge {bet['edge_cents']}c")
+    if isinstance(bet.get("confidence"), (int, float)):
+        extra.append(f"conf {bet['confidence']:.2f}")
+    if extra:
+        lines.append(" | ".join(extra))
+    return {
+        "title": f"KALSHI ORDER PLACED: {bet.get('label', bet.get('ticker', 'bet'))}",
+        "body": "\n".join(l for l in lines if l),
+        "url": kalshi_market_url(bet.get("ticker", "")),
+        "tags": "moneybag,white_check_mark",
         "priority": "high",
     }
 

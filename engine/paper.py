@@ -1,12 +1,17 @@
 """Paper-trade ledger + the T-minus-first-pitch trigger.
 
-Strategy (recommend-only, no real orders): while the loop runs through the day,
-each game is "paper-bet" on the LAST cycle before its first pitch — i.e. when it
-starts within the trigger window and hasn't been bet yet — provided a
-recommendation clears the usual thresholds at that moment. That captures each bet
-at its real decision point (pitchers set, money has flowed, OI-momentum populated).
+Strategy: while the loop runs through the day, each game is triggered on the
+LAST cycle before its first pitch — i.e. when it starts within the trigger
+window and hasn't been bet yet — provided a recommendation clears the usual
+thresholds at that moment. That captures each bet at its real decision point
+(pitchers set, money has flowed, OI-momentum populated).
 
-`settle` grades the ledger against realized outcomes after games finish.
+`iter_trigger_candidates` is the shared selection logic; this module's
+`run_paper_trigger` just records candidates to a no-real-money ledger.
+engine/live.py's `run_live_trigger` uses the same selection to submit REAL
+orders instead — see that module.
+
+`settle` grades the paper ledger against realized outcomes after games finish.
 """
 from __future__ import annotations
 
@@ -111,20 +116,23 @@ class PaperLedger:
             f.write(json.dumps(bet, default=str) + "\n")
 
 
-def run_paper_trigger(recs: list[Recommendation], clients: dict, ledger: PaperLedger,
-                      window_minutes: float, now: Optional[datetime] = None) -> list[dict]:
-    """Paper-bet any recommended game that starts within `window_minutes` and
-    hasn't been bet yet. Returns the newly placed paper bets.
+def iter_trigger_candidates(recs: list[Recommendation], clients: dict, ledger: PaperLedger,
+                            window_minutes: float, now: Optional[datetime] = None):
+    """Yield (rec, bet_dict, game) for every recommendation whose game just
+    entered the T-minus-start trigger window and hasn't been bet yet (per
+    `ledger`). Does NOT record anything to `ledger` -- that's left to the
+    caller, so a live order that fails to submit (engine/live.py) is never
+    marked as bet and gets reconsidered next cycle, while a paper bet
+    (run_paper_trigger, below) can record unconditionally.
 
     `clients` is {"mlb": MlbStatsClient(), "nfl": NflDataClient(), "nba": NbaDataClient(),
-    "nhl": NhlDataClient()}, used both to label the ledger row with a "matchup" string and --
+    "nhl": NhlDataClient()}, used both to label the row with a "matchup" string and --
     for NFL/NHL -- to resolve the real kickoff/puck-drop (data/games.py::match_game). Kalshi's
     own `occurrence_datetime` (`r.game_datetime`) is only a last-resort fallback for
     MLB/NFL/NHL, and the ONLY option for NBA (no independent kickoff source exists yet); see
     the module note above."""
     now = now or datetime.now(timezone.utc)
     sched_cache: dict = {}
-    placed: list[dict] = []
     for r in recs:
         event_key = r.ticker.rsplit("-", 1)[0]
         # Start time, in preference order (occurrence_datetime last -- it carries a
@@ -189,8 +197,17 @@ def run_paper_trigger(recs: list[Recommendation], clients: dict, ledger: PaperLe
             "confidence": r.confidence,
             "money_flow": r.money_flow_score,
         }
+        yield r, bet, g
+
+
+def run_paper_trigger(recs: list[Recommendation], clients: dict, ledger: PaperLedger,
+                      window_minutes: float, now: Optional[datetime] = None) -> list[dict]:
+    """Paper-bet any recommended game that starts within `window_minutes` and
+    hasn't been bet yet. Returns the newly placed paper bets."""
+    placed: list[dict] = []
+    for r, bet, _g in iter_trigger_candidates(recs, clients, ledger, window_minutes, now):
         ledger.record(bet)
         placed.append(bet)
         log.info("PAPER BET (%.0f min before): %s %s @ %.2f  edge %s  conf %.2f",
-                 minutes, r.side, bet["label"], r.entry_price, r.edge_cents, r.confidence)
+                 bet["minutes_before"], r.side, bet["label"], r.entry_price, r.edge_cents, r.confidence)
     return placed

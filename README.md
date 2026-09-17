@@ -1,13 +1,18 @@
 # Kalshi Sports Trader
 
-A recommend-only trading agent for Kalshi's sports markets. It watches where money is
-moving in the order book, checks that against its own fair-value model of the game, and
-when the two agree by enough it sends me a trade to place.
+A trading agent for Kalshi's sports markets. It watches where money is moving in the order
+book, checks that against its own fair-value model of the game, and when the two agree by
+enough it sizes a trade.
 
-It does not place the trade. There is no code path in this repo that submits, cancels, or
-modifies an order — the agent works out the size, texts me the order slip, and I tap buy in
-the Kalshi app myself. That was a deliberate choice and I've kept it, partly because the
-edge here is thin enough that I want a human looking at every ticket.
+By default (`loop`) it's still recommend-only: it works out the size, texts me the order
+slip, and I tap buy in the Kalshi app myself. `loop --live` (added 2026-09-17, at my
+explicit request) switches that same trigger to actually submit the order through Kalshi's
+API — no confirmation step, straight to the live account, gated only by the per-order
+caps in `config/settings.py` (`max_order_contracts`, `max_order_cost_usd`). I text/push
+myself a receipt after each order lands, not a slip to act on. See `engine/live.py` and
+`engine/execution.py` for exactly what is and isn't guarded on that path — it's a real
+reversal of the original design boundary below, made deliberately and not lightly, given
+how thin the edge here is.
 
 Covers MLB and NFL right now. Both run through the same pipeline in the same scan cycle;
 only the fair-value half is sport-specific.
@@ -118,7 +123,8 @@ Then:
 .venv\Scripts\python cli.py status          # account, exchange, positions
 .venv\Scripts\python cli.py rank            # today's ranked recommendations
 .venv\Scripts\python cli.py inspect TICKER  # quote, book, flow, fair value for one market
-.venv\Scripts\python cli.py loop --paper    # the real thing: scan, alert, log
+.venv\Scripts\python cli.py loop --paper    # scan, alert, log to the paper ledger (no real orders)
+.venv\Scripts\python cli.py loop --live     # scan and SUBMIT REAL ORDERS automatically (real money)
 .venv\Scripts\python cli.py settle          # grade the ledger against outcomes
 ```
 
@@ -181,6 +187,9 @@ Other things on the list:
 
 ## Disclaimer
 
-This is a personal project, it recommends rather than trades, and it's been profitable over
-a sample small enough that it could still be luck. Nothing here is financial advice. If you
-run it, you're the one placing the orders and taking the risk.
+This is a personal project and it's been profitable over a sample small enough that it
+could still be luck. Nothing here is financial advice. Run it recommend-only (`loop`,
+`loop --paper`) and you're the one placing every order. Run it with `loop --live` and it
+places real orders itself, automatically, with real money, subject only to the per-order
+caps in `config/settings.py` — you are still the one who owns the outcome and the risk,
+you've just moved the trigger finger from yourself to the code.

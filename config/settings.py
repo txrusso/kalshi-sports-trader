@@ -34,8 +34,47 @@ class Settings:
     # Environment
     use_demo: bool = False
 
-    # Loop cadence (seconds). ~20 min = balanced money-flow tracking.
-    scan_interval_seconds: int = 20 * 60
+    # Loop cadence (seconds). 1800 -> 600 on 2026-09-22, after in-game trading
+    # shipped made the cadence a first-order driver of results rather than just a
+    # freshness knob. Three measurements drove it:
+    #
+    # 1. IN-GAME COVERAGE. With a 40-min in-game window, a 1800s cadence gave a
+    #    mean of 1.31 scans inside the window -- roughly ONE shot per game -- and
+    #    11% of markets got ZERO scans in it, so those games could never be bet
+    #    in-game at all. The median first in-game look landed 20.9 min after first
+    #    pitch, while backtest/in_game_backtest.py's own buckets say the money is
+    #    earlier (0-15 min +0.31, 15-30 min +0.36, 30-45 min +0.04). At 600s it's
+    #    ~4 scans per window, ~0% missed, first look ~5 min in.
+    #
+    # 2. PREGAME TRIGGER TIMING. The loop's trigger window is
+    #    `scan_interval_seconds/60 + paper_trigger_buffer_min`, so 1800s meant a
+    #    45-min window and bets firing anywhere in (15, 45] min before first
+    #    pitch. On the real ledger (n=158 settled) that tail LOSES money:
+    #      0-10 min  n=23  ROI -0.202
+    #      10-20 min n=30  ROI +0.362
+    #      20-30 min n=53  ROI +0.064
+    #      30-45 min n=49  ROI -0.233   <- exists only because the interval was 1800s
+    #    At 600s the window is 25 min, so every pregame bet fires in (15, 25] --
+    #    inside the two profitable buckets, with the losing tail structurally gone.
+    #
+    # 3. WHAT STOPS IT GOING SHORTER. A full-coverage cycle measures 270-295s, so
+    #    300s would run a ~98% duty cycle (infeasible, and cycle time grows as more
+    #    markets list); 600s is ~49%. Separately, `oi_momentum` is d_oi/oi_now
+    #    between consecutive snapshots and is therefore mechanically proportional
+    #    to the gap. Measured against natural gap variation in the snapshot
+    #    history: at 10-min gaps |mf_oi| is 0.0130 vs 0.0189 at 30 min (~69%) but
+    #    composite |mf_score| moves only 0.2512 vs 0.2557 (-1.8%), because OI is
+    #    25% weight and is zero ~92% of the time. At 5-min gaps |mf_oi| collapses
+    #    to 0.0033 -- a second, independent reason not to go below 600s.
+    #
+    # CAVEATS, stated plainly: (1) and (3) are arithmetic/measurement, but (2) is
+    # an in-sample slice of the real ledger at n=23-53 per bucket, which this
+    # project's own standard calls "hypotheses to watch, not findings". A 10-min
+    # cadence CANNOT be backtested directly -- no 10-minute snapshots exist. And
+    # more scans means more games qualify, so bet count and simultaneous exposure
+    # rise, with no daily loss cap in place (a deliberate omission -- see
+    # CLAUDE.md's "Live order execution").
+    scan_interval_seconds: int = 600
 
     # --- Market universe (MLB + NFL + NBA + NHL) ---
     # Kalshi series tickers for game markets. Discovered/verified at runtime; these

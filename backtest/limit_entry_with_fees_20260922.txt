@@ -1,0 +1,30 @@
+Fees: ON -- filled limits billed as MAKER fills, takers at the full rate
+Loaded 264692 snapshot rows.
+Resolving outcomes for 7631 markets (one network pass)...
+Resolved 5996 settled market-sides.
+289 model bets with a >=2-snapshot fill window (135 excluded for a single-snapshot window).
+
+TAKER baseline (pay the last-cycle ask, today's behavior): n=289  win%=0.623  ROI=0.0419
+   by kind -> winner 78/0.0737   total 211/0.033
+
+=== placement = penultimate - peg a limit ONE CYCLE before you'd take it, vs paying the last-cycle ask (the realistic test) ===
+ offset  fill% save_c fillWR missWR  skipROI   fbROI  fb_win  fb_tot
+--------------------------------------------------------------------
+   0.5c   0.36 -11.76  0.625  0.622  -0.1244 -0.0234  0.0594 -0.0452
+   1.0c   0.36 -11.27  0.625  0.622  -0.1183 -0.0207  0.0603  -0.042
+   2.0c  0.336 -11.09  0.619  0.625  -0.1288 -0.0157  0.0606  -0.036
+   3.0c  0.304 -11.24  0.614  0.627  -0.1248 -0.0114  0.0608 -0.0306
+
+=== placement = first - commit early: anchor at the FIRST pregame ask, rest the whole window (max lead time) ===
+ offset  fill% save_c fillWR missWR  skipROI   fbROI  fb_win  fb_tot
+--------------------------------------------------------------------
+   0.5c  0.713  -9.76  0.631  0.602  -0.0686 -0.0598  0.0378  -0.085
+   1.0c  0.713  -9.26  0.631  0.602  -0.0616 -0.0546  0.0434   -0.08
+   2.0c  0.602 -10.09  0.626  0.617  -0.0776 -0.0482  0.0459 -0.0726
+   3.0c  0.547 -10.22  0.627  0.618  -0.0805 -0.0416  0.0476 -0.0649
+
+fill%   = share of bets whose limit filled (conservative: only checked at ~20-30min snapshots)
+save_c  = avg cents saved on entry vs the taker ask, on filled bets
+fillWR/missWR = win rate of filled vs never-filled bets -- if fillWR << missWR, limits are adversely selected (filling on losers)
+skipROI = ROI resting the limit and skipping if unfilled;  fbROI = ROI falling back to the taker ask if unfilled (fb_win/fb_tot = fbROI split by market kind)
+Compare fbROI vs the taker baseline ROI above: that's the net effect of using limits. In-sample, one partial season -- directional, not significant.

@@ -1,0 +1,67 @@
+Loaded 270224 snapshot rows.
+26723 are MLB winner-market rows.
+Resolving outcomes for 1152 markets (one network pass)...
+Resolved 1054 settled market-sides.
+
+Replaying in-game entries  (max_minutes=40, min_edge=8c)
+Fetching per-play win-probability history (cached after the first run)...
+
+PIPELINE
+  tickers_settled        1054
+  games_with_wp          1054
+  in_game_snapshots      3519
+  past_max_minutes       2586
+  no_play_yet            150
+  priced                 783
+  gated_out              694
+  bets                   50
+
+====================================================================
+IN-GAME ENTRIES (MLB winner markets, one bet per game)
+====================================================================
+  n=50  win%=0.6  ROI=0.2755  ROI net of fees=0.2582
+  avg entry=0.4704  avg edge=12.46c  avg minutes into game=22.6
+  flat-$1 P&L=+6.48  fees=$0.41
+
+  by minutes into the game:
+    min     0-15     n=11   win%=0.545  roi=  0.3304  net=  0.3098
+    min    15-30     n=23   win%=0.652  roi=  0.3787  net=  0.3616
+    min    30-45     n=16   win%=0.562  roi=   0.107  net=  0.0911
+
+  by modeled edge:
+    edge     0-10     n=9    win%=0.556  roi=  0.0101  net= -0.0051
+    edge    10-15     n=31   win%=0.613  roi=  0.3222  net=  0.3048
+    edge    15-20     n=9    win%=0.556  roi=  0.3477  net=  0.3278
+    edge    20-30     n=1    win%=1.0    roi=  1.0408  net=  1.0229
+
+  by entry price:
+    px     0-0.2    n=2    win%=0.0    roi=    -1.0  net= -1.0304
+    px   0.2-0.4    n=9    win%=0.333  roi=  -0.026  net=  -0.049
+    px   0.4-0.6    n=29   win%=0.655  roi=   0.393  net=  0.3746
+    px   0.6-0.8    n=10   win%=0.8    roi=  0.2251  net=  0.2131
+
+====================================================================
+WALK-FORWARD SPLIT (cut at 2026-09-02)
+====================================================================
+  in-game TRAIN          n=22   win%=0.591  ROI=  0.2634  net=  0.2455
+  in-game VALIDATE       n=28   win%=0.607  ROI=   0.285  net=   0.268
+
+  profitable on BOTH splits net of fees: YES
+
+====================================================================
+SAME GAMES, ENTERED PREGAME INSTEAD
+====================================================================
+  6 of these 50 games also produced a pregame bet.
+  pregame (same games)   n=6    win%=0.5    ROI=  0.0949  net=  0.0769
+  in-game (same games)   n=50   win%=0.6    ROI=  0.2755  net=  0.2582
+
+  head-to-head on the overlap only:
+    pregame              n=6    win%=0.5    ROI=  0.0949  net=  0.0769
+    in-game              n=6    win%=0.667  ROI=  0.4286  net=  0.4107
+
+  NOTE: production bets once per event, so these two COMPETE --
+  a game taken pregame is never re-taken in-game.
+
+NOTE: in-sample on one partial season, and every bucket is small -- read
+direction, not significance. The win-probability model is MLB's own, so a
+positive result means the MARKET was slow to it, not that our model is good.

@@ -22,9 +22,11 @@ from data.mlb_stats import MlbStatsClient
 from data.nfl_data import NflDataClient
 from data.nba_data import NbaDataClient
 from data.nhl_data import NhlDataClient
+from engine.account_summary import render as render_account_summary
 from engine.notify import (SmsNotifier, PushNotifier, format_bet_sms, format_bet_push,
                           format_order_placed_sms, format_order_placed_push)
 from engine.live import LiveLedger, run_live_trigger
+from engine.maker import MakerManager
 from engine.paper import PaperLedger, run_paper_trigger
 from engine.scanner import run_scan
 from engine.snapshot import SnapshotStore
@@ -91,6 +93,58 @@ def resolve_bankroll(client: KalshiClient, settings: Settings) -> Settings:
     return replace(settings, bankroll_usd=usd)
 
 
+_maker: MakerManager | None = None
+
+
+def _maker_fill_recorder(order, bet: dict) -> None:
+    """Called by MakerManager when an order reaches a terminal state with a fill.
+
+    This is where a maker bet enters the ledger -- at fill time, with the REAL
+    filled quantity and average price, not at submit time with the requested
+    ones. A partial fill records the partial. Notification is best-effort and
+    wrapped, exactly like the taker path: the fill is real money either way and
+    must never be lost to a formatting error."""
+    try:
+        LiveLedger().record(bet)
+    except Exception:
+        log.exception("MAKER: ledger write FAILED for %r -- the fill is real. "
+                      "Reconcile against /portfolio/fills.", bet.get("label"))
+    try:
+        PushNotifier().send(format_order_placed_push(bet))
+    except Exception:
+        log.exception("MAKER: push alert crashed for %r (fill still recorded).", bet.get("label"))
+    try:
+        SmsNotifier().send(format_order_placed_sms(bet))
+    except Exception:
+        log.exception("MAKER: text alert crashed for %r (fill still recorded).", bet.get("label"))
+
+
+def get_maker_manager(client: KalshiClient, settings: Settings) -> MakerManager:
+    """The one MakerManager for this process. It owns a background thread, so it
+    must outlive individual scan cycles -- the whole point is that it re-pegs on
+    its own 30s cadence while the scan loop sleeps for 30 minutes."""
+    global _maker
+    if _maker is None:
+        _maker = MakerManager(client, settings, on_fill=_maker_fill_recorder)
+        _maker.start()
+    return _maker
+
+
+def shutdown_maker_manager() -> None:
+    """Cancel anything still resting and stop the thread. Called on loop exit so
+    a shutdown never leaves unmanaged orders on the book -- an orphaned resting
+    order could otherwise fill long after the game started, at a price the model
+    never intended."""
+    global _maker
+    if _maker is not None:
+        try:
+            _maker.stop(drain=True)
+        except Exception:
+            log.exception("Maker manager shutdown failed; check for resting orders "
+                          "with `cli.py orders`.")
+        _maker = None
+
+
 def run_once(settings: Settings = DEFAULTS, ctx=None) -> list:
     standalone = ctx is None
     client, mlb, nfl, nba, nhl, fair_router, store, calibration = ctx or build_context(settings)
@@ -104,6 +158,12 @@ def run_once(settings: Settings = DEFAULTS, ctx=None) -> list:
     store.append_rows(result.snapshot_rows)
     write_outputs(result.recommendations, result.scanned, result.deep_scanned)
 
+    sport_clients = {"mlb": mlb, "nfl": nfl, "nba": nba, "nhl": nhl}
+    try:
+        print(render_account_summary(client, sport_clients))
+    except Exception:
+        log.warning("Account summary failed to render (recommendations still shown).", exc_info=True)
+
     print(render_console(result.recommendations, result.scanned, result.deep_scanned))
 
     # Both triggers fire on the same last-cycle-before-first-pitch window.
@@ -113,9 +173,14 @@ def run_once(settings: Settings = DEFAULTS, ctx=None) -> list:
     # step -- see engine/live.py for exactly what is and isn't guarded.
     if settings.live_trade:
         live_ledger = LiveLedger()
-        live_placed = run_live_trigger(result.recommendations,
-                                       {"mlb": mlb, "nfl": nfl, "nba": nba, "nhl": nhl},
-                                       live_ledger, client, settings, window)
+        maker = get_maker_manager(client, settings) if settings.maker_mode else None
+        live_placed = run_live_trigger(result.recommendations, sport_clients,
+                                       live_ledger, client, settings, window,
+                                       maker=maker)
+        if maker is not None:
+            # Maker orders return nothing here -- they rest, and the ledger row is
+            # written by _maker_fill_recorder when they actually fill.
+            print("\n>> MAKER " + maker.summary())
         if live_placed:
             try:
                 print(f"\n>> LIVE ORDER {len(live_placed)} placed "
@@ -145,9 +210,8 @@ def run_once(settings: Settings = DEFAULTS, ctx=None) -> list:
     # Paper-trade trigger: bet each game on the last cycle before its first pitch.
     if settings.paper_trade:
         ledger = PaperLedger()
-        placed = run_paper_trigger(result.recommendations,
-                                   {"mlb": mlb, "nfl": nfl, "nba": nba, "nhl": nhl},
-                                   ledger, window)
+        placed = run_paper_trigger(result.recommendations, sport_clients, ledger, window,
+                                   settings=settings)
         if placed:
             # The bets are already recorded to the ledger above -- announcing/texting them
             # is best-effort. A formatting hiccup here must never look like "nothing happened";
@@ -182,6 +246,14 @@ def run_once(settings: Settings = DEFAULTS, ctx=None) -> list:
                         log.warning("SMS not sent for bet %r -- check notify_config.txt.", b.get("label"))
                 except Exception:
                     log.exception("Text alert crashed for bet %r (bet is still recorded).", b.get("label"))
+
+    # A one-shot scan has no loop to service the re-peg/deadline lifecycle, so any
+    # order it rested would be orphaned on the book with nothing left to cancel or
+    # cross it. Drain before returning; maker mode is only meaningful under `loop`.
+    if standalone and settings.live_trade and settings.maker_mode:
+        log.info("Standalone run: draining maker orders (maker mode needs the loop "
+                 "to manage re-pegs and the taker fallback).")
+        shutdown_maker_manager()
 
     log.info("Cycle complete: %d recommendations.", len(result.recommendations))
     return result.recommendations
@@ -227,6 +299,7 @@ def run_loop(settings: Settings = DEFAULTS) -> None:
             run_once(settings, ctx=ctx)
         except KeyboardInterrupt:
             log.info("Interrupted; shutting down.")
+            shutdown_maker_manager()
             break
         except Exception:
             log.exception("Cycle %d failed; continuing to next cycle.", cycle)
@@ -239,4 +312,5 @@ def run_loop(settings: Settings = DEFAULTS) -> None:
             time.sleep(sleep_for)
         except KeyboardInterrupt:
             log.info("Interrupted during sleep; shutting down.")
+            shutdown_maker_manager()
             break

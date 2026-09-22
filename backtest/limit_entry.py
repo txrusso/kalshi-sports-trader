@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import argparse
 from collections import defaultdict
+from config.fees import fee_for
 from dataclasses import dataclass
 
 from config.sports import is_total
@@ -119,11 +120,21 @@ def _simulate_fill(bet: Bet, offset: float, placement: str) -> tuple[bool, float
     return filled, limit
 
 
-def _acc(s: dict, entry: float, won: bool) -> None:
+CHARGE_FEES: bool = True   # set False by --no-fees to reproduce the original fee-blind result
+
+
+def _acc(s: dict, entry: float, won: bool, ticker: str = "", is_taker: bool = True) -> None:
     s["n"] += 1
     s["wins"] += int(won)
     s["pnl"] += (1 - entry) if won else -entry
     s["staked"] += entry
+    # The whole point of resting: a FILLED limit is a maker fill (free on a
+    # `quadratic` series, quarter-rate elsewhere); taking pays the full rate.
+    # Flat 1 contract/bet, matching this harness's $1 convention.
+    if CHARGE_FEES:
+        fee = fee_for(1.0, entry, ticker, is_taker)
+        s["pnl"] -= fee
+        s["fees"] += fee
 
 
 def _roi(s: dict):
@@ -135,9 +146,9 @@ def _wr(s: dict):
 
 
 def grade(bets: list[Bet], offset: float, placement: str) -> dict:
-    pol = {p: {"n": 0, "wins": 0, "pnl": 0.0, "staked": 0.0}
+    pol = {p: {"n": 0, "wins": 0, "pnl": 0.0, "staked": 0.0, "fees": 0.0}
            for p in ("taker", "limit_skip", "limit_fb")}
-    by_kind = {p: {k: {"n": 0, "wins": 0, "pnl": 0.0, "staked": 0.0}
+    by_kind = {p: {k: {"n": 0, "wins": 0, "pnl": 0.0, "staked": 0.0, "fees": 0.0}
                    for k in ("winner", "total")} for p in ("taker", "limit_fb")}
     filled_n = filled_wins = 0
     unfilled_n = unfilled_wins = 0
@@ -146,18 +157,18 @@ def grade(bets: list[Bet], offset: float, placement: str) -> dict:
     for b in bets:
         filled, limit = _simulate_fill(b, offset, placement)
         kind = "total" if b.is_total else "winner"
-        _acc(pol["taker"], b.taker_entry, b.won)
-        _acc(by_kind["taker"][kind], b.taker_entry, b.won)
+        _acc(pol["taker"], b.taker_entry, b.won, b.ticker, True)
+        _acc(by_kind["taker"][kind], b.taker_entry, b.won, b.ticker, True)
         if filled:
-            _acc(pol["limit_skip"], limit, b.won)
-            _acc(pol["limit_fb"], limit, b.won)
-            _acc(by_kind["limit_fb"][kind], limit, b.won)
+            _acc(pol["limit_skip"], limit, b.won, b.ticker, False)
+            _acc(pol["limit_fb"], limit, b.won, b.ticker, False)
+            _acc(by_kind["limit_fb"][kind], limit, b.won, b.ticker, False)
             filled_n += 1
             filled_wins += int(b.won)
             savings += b.taker_entry - limit
         else:
-            _acc(pol["limit_fb"], b.taker_entry, b.won)
-            _acc(by_kind["limit_fb"][kind], b.taker_entry, b.won)
+            _acc(pol["limit_fb"], b.taker_entry, b.won, b.ticker, True)
+            _acc(by_kind["limit_fb"][kind], b.taker_entry, b.won, b.ticker, True)
             unfilled_n += 1
             unfilled_wins += int(b.won)
 
@@ -169,9 +180,11 @@ def grade(bets: list[Bet], offset: float, placement: str) -> dict:
         "avg_savings_c": round(savings / filled_n * 100, 2) if filled_n else None,
         "filled_wr": round(filled_wins / filled_n, 3) if filled_n else None,
         "unfilled_wr": round(unfilled_wins / unfilled_n, 3) if unfilled_n else None,
-        "taker": {"roi": _roi(pol["taker"]), "wr": _wr(pol["taker"]), "n": pol["taker"]["n"]},
+        "taker": {"roi": _roi(pol["taker"]), "wr": _wr(pol["taker"]), "n": pol["taker"]["n"],
+                  "fees": round(pol["taker"]["fees"], 4)},
         "limit_skip": {"roi": _roi(pol["limit_skip"]), "wr": _wr(pol["limit_skip"]), "n": pol["limit_skip"]["n"]},
-        "limit_fb": {"roi": _roi(pol["limit_fb"]), "wr": _wr(pol["limit_fb"]), "n": pol["limit_fb"]["n"]},
+        "limit_fb": {"roi": _roi(pol["limit_fb"]), "wr": _wr(pol["limit_fb"]), "n": pol["limit_fb"]["n"],
+                     "fees": round(pol["limit_fb"]["fees"], 4)},
         "by_kind": {p: {k: {"n": by_kind[p][k]["n"], "roi": _roi(by_kind[p][k])}
                         for k in ("winner", "total")} for p in ("taker", "limit_fb")},
     }
@@ -182,7 +195,14 @@ def main() -> None:
     ap.add_argument("--since", help="only snapshots on/after YYYY-MM-DD")
     ap.add_argument("--offsets", nargs="+", type=float, default=[0.5, 1.0, 2.0, 3.0],
                     help="limit offsets inside the ask, in CENTS (default 0.5 1 2 3)")
+    ap.add_argument("--no-fees", action="store_true",
+                    help="grade gross of fees (reproduces the original 2026-09-01 fee-blind run)")
     args = ap.parse_args()
+
+    global CHARGE_FEES
+    CHARGE_FEES = not args.no_fees
+    print("Fees: " + ("ON -- filled limits billed as MAKER fills, takers at the full rate"
+                      if CHARGE_FEES else "OFF (gross)"))
 
     rows = load_rows(args.since)
     if not rows:

@@ -33,7 +33,7 @@ class Recommendation:
     fair_prob: Optional[float]
     fair_source: str
     suggested_stake_usd: float
-    suggested_contracts: int
+    suggested_contracts: float
     rationale: str
     spread_cents: float
     volume: float
@@ -61,14 +61,16 @@ def _liquidity_score(q: MarketQuote, settings: Settings) -> float:
 
 
 def _kelly_contracts(win_prob: float, cost: float, bankroll: float,
-                     settings: Settings) -> tuple[float, int]:
+                     settings: Settings) -> tuple[float, float]:
     if cost <= 0 or cost >= 1:
-        return 0.0, 0
+        return 0.0, 0.0
     f_star = (win_prob - cost) / (1 - cost)          # full-Kelly fraction for a $1-payout contract
     f = max(0.0, f_star) * settings.kelly_fraction
     f = min(f, settings.max_stake_pct)
     stake = bankroll * f
-    contracts = int(stake / cost) if cost > 0 else 0
+    # Kalshi supports fractional contract counts (0.01 granularity), so size to
+    # the full Kelly-suggested stake instead of flooring to a whole contract.
+    contracts = round(stake / cost, 2) if cost > 0 else 0.0
     return round(stake, 2), contracts
 
 
@@ -163,7 +165,38 @@ def build_recommendation(q: MarketQuote, mf: MoneyFlow, fv: FairValue,
     # game_state of None means the market couldn't even be matched (unverifiable,
     # so treated as unsafe). Re-checking game_state directly here would silently
     # re-introduce the exact bug that fix was for.
-    if settings.pregame_only and (fv.source == "skip_non_pregame" or fv.game_state is None):
+    # Unverifiable is ALWAYS unsafe, independent of policy. game_state=None means
+    # the market couldn't be matched to a real game at all (NFL preseason, an
+    # unmatched ticker), so there is nothing to price against. This check used to
+    # sit behind `pregame_only`, which meant --allow-live silently ALSO permitted
+    # money-flow-only bets on unmatched markets -- harmless while nothing traded
+    # in-game, a real money risk once in_game_trade exists. Split out 2026-09-22.
+    if fv.game_state is None:
+        return None
+    if settings.pregame_only and fv.source == "skip_non_pregame":
+        return None
+
+    # A game that has already started and has NO fair value would be a bet placed
+    # on money flow alone, on a game whose score the model cannot see. NFL/NBA/NHL
+    # all return prob=None once a game starts ("no live <sport> model yet"), and a
+    # finished game falls through the same way -- refuse all of them.
+    started = fv.game_state != "Preview"
+    if started and fv.prob is None:
+        return None
+    # A PREGAME-sourced estimate on a game that has already started is stale by
+    # construction -- it was computed from season rates/ratings and knows nothing
+    # about the score. Only a genuinely live source (MLB's in-game win
+    # probability, fair_source="live") may price a started game. This is the
+    # general form of the MLB-totals bug found 2026-09-22: that model returned a
+    # full-game expected_runs() for an in-progress game, which `prob is None`
+    # above could not catch because the number was real, just wrong.
+    if started and (fv.source or "").startswith("pregame"):
+        return None
+    # A settled game has no uncertainty left to price. MLB never returns a prob
+    # for a Final game today (it falls through to prob=None above), so this is
+    # defence in depth rather than a live path -- but betting a decided outcome
+    # is the single worst failure this gate could allow.
+    if fv.game_state == "Final":
         return None
 
     # --- gate: need a tradeable two-sided market ---
@@ -220,7 +253,11 @@ def build_recommendation(q: MarketQuote, mf: MoneyFlow, fv: FairValue,
             confidence = round(max(0.0, min(1.0, confidence * cal_mult)), 4)
 
     # --- filters ---
-    if edge_cents is not None and not conflict and edge_cents < settings.min_edge_cents \
+    # In-game bets clear a stiffer edge bar than pregame ones: prices move fast
+    # mid-game, our book read is already stale, and a live win-prob swings far
+    # more per minute than a pregame estimate does.
+    min_edge = settings.in_game_min_edge_cents if started else settings.min_edge_cents
+    if edge_cents is not None and not conflict and edge_cents < min_edge \
             and flow_conf < 0.5:
         return None
     if edge_cents is None and flow_conf < 0.45:

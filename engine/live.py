@@ -36,12 +36,13 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
 from config.settings import OUTPUT_DIR, Settings
 from engine.execution import ExecutionDisabled, OrderRequest, submit_order
+from engine.maker import MakerManager
 from engine.paper import PaperLedger, iter_trigger_candidates
 from kalshi.client import KalshiClient, KalshiError
 from signals.recommendation import Recommendation
@@ -60,9 +61,22 @@ class LiveLedger(PaperLedger):
         super().__init__(path or (OUTPUT_DIR / "live_ledger.jsonl"))
 
 
+def _deadline_for(bet: dict, settings: Settings) -> Optional[datetime]:
+    """When a resting maker order must give up and cross: `maker_taker_fallback_min`
+    before the game starts. `first_pitch` is already the schedule-corrected start
+    time (engine/paper.py works around Kalshi's +3h occurrence_datetime skew), so
+    this inherits that correction rather than re-deriving it."""
+    try:
+        fp = datetime.fromisoformat(bet["first_pitch"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return fp - timedelta(minutes=settings.maker_taker_fallback_min)
+
+
 def run_live_trigger(recs: list[Recommendation], clients: dict, ledger: LiveLedger,
                      client: KalshiClient, settings: Settings, window_minutes: float,
-                     now: Optional[datetime] = None) -> list[dict]:
+                     now: Optional[datetime] = None,
+                     maker: Optional[MakerManager] = None) -> list[dict]:
     """Submit a real order for any recommended game that starts within
     `window_minutes` and hasn't been bet yet. Returns the newly placed
     (successfully submitted) bets, each with order_id/order_status/
@@ -72,7 +86,26 @@ def run_live_trigger(recs: list[Recommendation], clients: dict, ledger: LiveLedg
     skipped WITHOUT recording to `ledger`, so it's reconsidered next cycle
     rather than being silently lost."""
     placed: list[dict] = []
-    for r, bet, _g in iter_trigger_candidates(recs, clients, ledger, window_minutes, now):
+    for r, bet, _g in iter_trigger_candidates(recs, clients, ledger, window_minutes, now,
+                                              settings):
+        # --- maker mode: rest on the book instead of crossing ---------------
+        # Nothing is recorded to the ledger here. The order may fill partially,
+        # later, or not at all, so the row is written by MakerManager's on_fill
+        # callback once the real filled quantity and average price are known.
+        # `maker.place()` is idempotent per event, so the next scan cycle
+        # re-offering the same game while an order still rests is a no-op.
+        if maker is not None and settings.maker_mode:
+            deadline = _deadline_for(bet, settings)
+            if deadline is None:
+                log.warning("MAKER %s: no resolvable start time; falling back to a taker order.",
+                            r.ticker)
+            else:
+                bet["execution"] = "maker"
+                maker.place(ticker=r.ticker, side=r.side.lower(),
+                            contracts=r.suggested_contracts, limit_cap=r.entry_price,
+                            deadline=deadline, bet=bet, event_key=bet["event_key"])
+                continue
+
         coid = str(uuid.uuid5(_ORDER_NAMESPACE, bet["event_key"]))
         req = OrderRequest(ticker=r.ticker, side=r.side.lower(), action="buy",
                            count=r.suggested_contracts, limit_price=r.entry_price)

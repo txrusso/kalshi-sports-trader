@@ -174,10 +174,11 @@ class KalshiClient:
         data = self._get("/markets/trades", {"ticker": ticker, "limit": limit})
         return data.get("trades", []) or []
 
-    def create_order(self, ticker: str, side: str, action: str, count: int,
+    def create_order(self, ticker: str, side: str, action: str, count: float,
                      limit_price: float, client_order_id: str,
                      time_in_force: str = "good_till_canceled",
-                     self_trade_prevention_type: str = "taker_at_cross") -> dict:
+                     self_trade_prevention_type: str = "taker_at_cross",
+                     post_only: bool = False) -> dict:
         """POST /portfolio/events/orders (v2) — places a REAL limit order.
 
         Kalshi deprecated the old /portfolio/orders endpoint (confirmed 2026-09-17,
@@ -216,6 +217,14 @@ class KalshiClient:
             "time_in_force": time_in_force,
             "self_trade_prevention_type": self_trade_prevention_type,
         }
+        # post_only makes the exchange itself reject an order that would cross and
+        # execute as a taker -- the only way to GUARANTEE maker status, since our own
+        # book read is always a few hundred ms stale. Confirmed present on this
+        # endpoint 2026-09-22 (docs.kalshi.com/api-reference/orders/create-order-v2
+        # lists it as an optional boolean). Only sent when True so the request body
+        # for the existing taker path is byte-identical to what's been running.
+        if post_only:
+            body["post_only"] = True
         return self._post("/portfolio/events/orders", body)
 
     def cancel_order(self, order_id: str) -> dict:
@@ -233,6 +242,21 @@ class KalshiClient:
         params = {"status": status} if status else None
         return self._get("/portfolio/orders", params).get("orders", []) or []
 
-    def get_fills(self, limit: int = 100) -> list[dict]:
-        """Recent fills (executed trades on the account)."""
-        return self._get("/portfolio/fills", {"limit": limit}).get("fills", []) or []
+    def get_fills(self, limit: int = 100, order_id: Optional[str] = None,
+                  ticker: Optional[str] = None) -> list[dict]:
+        """Recent fills (executed trades on the account).
+
+        Each fill carries `fee_cost` and `is_taker`, which is how config/fees.py
+        verifies its model and how engine/maker.py tells a maker fill from a
+        taker one. `order_id` narrows to a single order's fills -- the primary
+        way the maker order manager detects partial and full fills."""
+        params: dict[str, Any] = {"limit": limit}
+        if order_id:
+            params["order_id"] = order_id
+        if ticker:
+            params["ticker"] = ticker
+        return self._get("/portfolio/fills", params).get("fills", []) or []
+
+    def get_order(self, order_id: str) -> dict:
+        """One order's current state (status, remaining_count, fill_count)."""
+        return self._get(f"/portfolio/orders/{order_id}").get("order", {}) or {}

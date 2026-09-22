@@ -117,6 +117,23 @@ class TotalsFairValueModel:
         if self.settings.pregame_only and not effective_pregame:
             return FairValue(None, "skip_non_pregame", 0.0,
                              {"reason": f"state={game.state}"}, game_state=game.state)
+        # THERE IS NO LIVE MLB TOTALS MODEL. Unlike the winner side (which has a
+        # genuine in-game win probability from the MLB Stats API), `expected_runs`
+        # below is a FULL-GAME estimate built from season run rates and the
+        # starting pitchers -- it has no idea how many runs have already scored or
+        # how many innings are left. Applying it to a game in the 7th with 9 runs
+        # already on the board would price an over that has ALREADY hit as a
+        # coin flip.
+        #
+        # Every other sport's totals/spread model already refuses here; this one
+        # didn't, which was harmless while pregame_only was permanently True and
+        # became a real money bug the moment in-game trading shipped (2026-09-22).
+        # Caught the same day by backtest/in_game_backtest.py's build.
+        if not effective_pregame:
+            return FairValue(None, "none", 0.0,
+                             {"reason": "no live MLB totals model (expected_runs is a "
+                                        "full-game estimate and ignores runs already scored)"},
+                             game_state=game.state)
 
         et = self._env.expected_runs(game)
         if et is None:

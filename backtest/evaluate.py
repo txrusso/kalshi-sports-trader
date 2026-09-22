@@ -21,10 +21,11 @@ import json
 from datetime import datetime, timezone
 
 from config.settings import SNAPSHOTS_DIR
-from config.sports import is_total, sport_of
+from config.sports import is_total, market_kind, sport_of
 from data.fair_value import parse_ticker
 from data.fair_value_nfl import parse_ticker as parse_nfl_ticker
 from data.fair_value_nfl_totals import parse_total_ticker as parse_nfl_total_ticker
+from data.fair_value_nfl_spread import parse_spread_ticker as parse_nfl_spread_ticker
 from data.fair_value_nba import parse_ticker as parse_nba_ticker
 from data.fair_value_nba_totals import parse_total_ticker as parse_nba_total_ticker
 from data.fair_value_nhl import parse_ticker as parse_nhl_ticker
@@ -75,7 +76,13 @@ def _bet_rank(r: dict) -> tuple:
 def _game_date(ticker: str) -> str | None:
     sport = sport_of(ticker)
     if sport == "nfl":
-        p = parse_nfl_total_ticker(ticker) if is_total(ticker) else parse_nfl_ticker(ticker)
+        kind = market_kind(ticker)
+        if kind == "total":
+            p = parse_nfl_total_ticker(ticker)
+        elif kind == "spread":
+            p = parse_nfl_spread_ticker(ticker)
+        else:
+            p = parse_nfl_ticker(ticker)
         return p.date_str if p else None
     if sport == "nba":
         p = parse_nba_total_ticker(ticker) if is_total(ticker) else parse_nba_ticker(ticker)

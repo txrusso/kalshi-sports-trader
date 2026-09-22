@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from config.settings import OUTPUT_DIR, EASTERN
+from config.settings import OUTPUT_DIR, EASTERN, Settings, DEFAULTS
 from config.sports import market_kind, sport_of
 from data.games import Game, match_game
 from signals.recommendation import Recommendation
@@ -117,7 +117,8 @@ class PaperLedger:
 
 
 def iter_trigger_candidates(recs: list[Recommendation], clients: dict, ledger: PaperLedger,
-                            window_minutes: float, now: Optional[datetime] = None):
+                            window_minutes: float, now: Optional[datetime] = None,
+                            settings: Settings = DEFAULTS):
     """Yield (rec, bet_dict, game) for every recommendation whose game just
     entered the T-minus-start trigger window and hasn't been bet yet (per
     `ledger`). Does NOT record anything to `ledger` -- that's left to the
@@ -133,6 +134,7 @@ def iter_trigger_candidates(recs: list[Recommendation], clients: dict, ledger: P
     the module note above."""
     now = now or datetime.now(timezone.utc)
     sched_cache: dict = {}
+    skewed: list[str] = []   # tickers where occurrence_datetime disagreed w/ the schedule
     for r in recs:
         event_key = r.ticker.rsplit("-", 1)[0]
         # Start time, in preference order (occurrence_datetime last -- it carries a
@@ -150,12 +152,24 @@ def iter_trigger_candidates(recs: list[Recommendation], clients: dict, ledger: P
         if sched_fp is not None and r.game_datetime is not None:
             skew_min = abs((sched_fp - r.game_datetime).total_seconds()) / 60.0
             if skew_min > 30:
-                log.warning("paper-trigger: %s occurrence_datetime %s disagrees with "
-                            "scheduled start %s by %.0f min; trusting the schedule.",
-                            r.ticker, r.game_datetime.isoformat(), sched_fp.isoformat(), skew_min)
+                # This is the known, already-diagnosed systematic Kalshi occurrence_datetime
+                # skew (see module note above) -- one line per rec, per cycle, was pure log
+                # noise for an expected/handled case. Batched into a single summary below.
+                skewed.append(r.ticker)
         minutes = (fp - now).total_seconds() / 60.0 if fp is not None else None
-        # "In the trigger window" = game starts within window_minutes (and hasn't yet).
-        in_window = minutes is not None and 0 < minutes <= window_minutes
+        # "In the trigger window" = the game starts within window_minutes and hasn't
+        # started yet. With `in_game_trade` on, a game that HAS started stays eligible
+        # for `in_game_max_minutes` afterwards (minutes goes negative once it begins),
+        # so an edge that only appears mid-game can still be bet. Only MLB ever gets
+        # here in practice -- the other sports return no fair value once a game starts
+        # and signals/recommendation.py refuses those outright.
+        if minutes is None:
+            in_window = False
+        elif minutes > 0:
+            in_window = minutes <= window_minutes
+        else:
+            in_window = (settings.in_game_trade
+                         and -minutes <= settings.in_game_max_minutes)
         # Log skip reasons only for games actually in the window, so a near-miss on a
         # bet we expected to fire is visible instead of silently dropped.
         if ledger.already_bet(event_key):
@@ -171,7 +185,7 @@ def iter_trigger_candidates(recs: list[Recommendation], clients: dict, ledger: P
                         "schedule match, no occurrence_datetime); cannot time-trigger.", r.ticker)
             continue
         if not in_window:
-            continue                          # too early (or already started) -- normal, no log
+            continue          # too early, or started longer ago than in_game_max_minutes
         # Matchup label is best-effort; on any failure fall back to the headline -- the bet
         # still records correctly, only the display label degrades. NFL/NHL already looked
         # the game up above for their timing, so this only costs a lookup for MLB/NBA.
@@ -198,14 +212,20 @@ def iter_trigger_candidates(recs: list[Recommendation], clients: dict, ledger: P
             "money_flow": r.money_flow_score,
         }
         yield r, bet, g
+    if skewed:
+        log.info("paper-trigger: %d/%d recs show the known occurrence_datetime-vs-schedule "
+                  "skew (NFL/MLB, expected -- trusting the schedule for all).",
+                  len(skewed), len(recs))
 
 
 def run_paper_trigger(recs: list[Recommendation], clients: dict, ledger: PaperLedger,
-                      window_minutes: float, now: Optional[datetime] = None) -> list[dict]:
+                      window_minutes: float, now: Optional[datetime] = None,
+                      settings: Settings = DEFAULTS) -> list[dict]:
     """Paper-bet any recommended game that starts within `window_minutes` and
     hasn't been bet yet. Returns the newly placed paper bets."""
     placed: list[dict] = []
-    for r, bet, _g in iter_trigger_candidates(recs, clients, ledger, window_minutes, now):
+    for r, bet, _g in iter_trigger_candidates(recs, clients, ledger, window_minutes, now,
+                                              settings):
         ledger.record(bet)
         placed.append(bet)
         log.info("PAPER BET (%.0f min before): %s %s @ %.2f  edge %s  conf %.2f",

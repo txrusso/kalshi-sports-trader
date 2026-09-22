@@ -68,7 +68,7 @@ class Settings:
     market_status: str = "open"          # only scan open markets
     min_market_volume: int = 50          # ignore illiquid markets (contracts traded)
     min_open_interest: int = 50
-    max_deep_markets: int = 100          # cap markets deep-scanned/cycle (bounds API load).
+    max_deep_markets: int = 1500         # cap markets deep-scanned/cycle (bounds API load).
                                          # Raised 50 -> 100 on 2026-09-02: with MLB and NFL
                                          # both live, the 50 cap was being exhausted by rank
                                          # ~15 of the liquidity-ranked event list, and real
@@ -83,6 +83,43 @@ class Settings:
                                          # Deep scan is 2 API calls/market (book + trades),
                                          # so this doubles per-cycle calls (~100 -> ~200),
                                          # still far inside a 30-min cycle.
+                                         #
+                                         # Raised 100 -> 500 on 2026-09-18, at the user's
+                                         # request, after NFL spread markets (added
+                                         # 2026-09-13, up to ~24 rungs/event) made the squeeze
+                                         # far worse: a live scan the same day found 83 of 85
+                                         # deep-scanned markets were NFL and only 2 were MLB,
+                                         # despite 15 real MLB games on the slate that night --
+                                         # NFL spread ladders alone were exhausting the 100 cap
+                                         # before the liquidity ranking ever reached most MLB
+                                         # events. Measured against that live candidate list
+                                         # (1,053 tradeable markets/166 events) before shipping:
+                                         # budget 100 -> 1 MLB event covered / 16 NFL; budget
+                                         # 500 -> 14 MLB / 37 NFL. MLB games are genuinely
+                                         # lower-liquidity than an NFL Sunday slate right now, so
+                                         # they'll never fully catch up in a liquidity-ranked
+                                         # scan, but 500 gets meaningfully more MLB coverage
+                                         # without a real cycle-time cost (~5x the ~100-market
+                                         # cycle time, still on the order of minutes against the
+                                         # 1800s loop interval). Re-check this balance if a
+                                         # sixth market kind or another high-rung-count sport
+                                         # ships and squeezes things further.
+                                         #
+                                         # Raised 500 -> 1500 same day (2026-09-18), at the
+                                         # user's request, after confirming there were only
+                                         # ~1,055 total tradeable markets live at the time --
+                                         # so 900-1000 already gave FULL coverage of both
+                                         # sports (60/60 MLB events, 63/63 NFL events measured
+                                         # live), and 1500 changes nothing about today's actual
+                                         # cycle behavior (still capped by the real candidate
+                                         # count, not this ceiling). It's pure headroom: buys
+                                         # room for the candidate count to grow (more sports
+                                         # live, more markets opening) before this cap starts
+                                         # binding again, at negligible cost since deep-scan
+                                         # cost scales with the ACTUAL number of candidate
+                                         # markets, not the ceiling itself (measured cycle time
+                                         # at full coverage of the live candidate list was
+                                         # ~288s, ~16% of the 1800s loop interval).
 
     # --- Money-flow signal weights (sum need not be 1; normalized internally) ---
     w_book_imbalance: float = 0.40       # dollar-weighted resting depth skew
@@ -128,7 +165,21 @@ class Settings:
     min_edge_cents: float = 5.5
     min_confidence: float = 0.35         # 0..1 composite confidence floor
     max_spread_cents: float = 6.0        # skip markets wider than this (untradeable)
-    top_n_recommendations: int = 15
+    # Raised 15 -> 50 on 2026-09-18, at the user's request, after the max_deep_markets
+    # 500->1500 bump (full scan coverage, same day) took the number of distinct
+    # qualifying games from ~8-9 (this cap's era) to 36 measured live -- 15 was quietly
+    # cutting off real, already-deduped (one bet/game) recommendations. This slice is
+    # pure display/trigger-eligibility, not an API-cost knob like max_deep_markets, so
+    # there's no scan-time cost to raising it; sized with headroom above today's 36 the
+    # same way max_deep_markets was sized with headroom above its measured need.
+    # NOTE: unlike max_deep_markets, this DOES interact with live risk -- the loop has no
+    # daily loss cap or max-concurrent-positions limit (a deliberate omission, see
+    # CLAUDE.md's "Live order execution"), so more simultaneously-eligible recs means more
+    # games CAN trigger a real order in the same cycle if their trigger windows overlap.
+    # Each order is still independently capped by max_stake_pct/max_order_cost_usd and
+    # submit_order() refuses if live balance can't cover it, so this raises how many
+    # DISTINCT games can bet, not the size of any one bet.
+    top_n_recommendations: int = 50
 
     # --- Advisory position sizing (NOT executed) ---
     dynamic_bankroll: bool = True        # pull live account balance as the bankroll each run
@@ -174,10 +225,87 @@ class Settings:
     # the bankroll grows. Honest read: 0.06 TIES on validate (+0.001) and clearly wins on
     # train -- the argument is picking a live value over a provably dead one, not a
     # tuned value over a good one.
+    #
+    # Raised 0.06 -> 0.10 on 2026-09-18, at the user's request, NOT re-validated by a
+    # fresh bankroll_sim sweep. The walk-forward grid above found 0.12-0.25 historically
+    # INERT (fractional Kelly rarely asked for >~11% of bankroll in that sample), which
+    # would put 0.10 still inside the "should rarely bind" range on average -- but that
+    # finding predates NFL spread markets (2026-09-13) and today's live `rank` run showed
+    # several real recs already hitting the old 0.06 cap on unusually large edges (e.g.
+    # Atlanta +1.5 at +21.3c), so the cap is demonstrably binding more often now than the
+    # historical sample suggests. Treat 0.10 the same as the 2026-08-31 unvalidated 0.25
+    # bump was treated: live at the user's explicit request, due for a proper
+    # `bankroll_sim --sweep max_stake_pct` re-check (ideally after re-running with
+    # fractional contract sizing, shipped 2026-09-17 -- see CLAUDE.md's "Live order
+    # execution" section -- since that sweep hasn't been redone under it either) rather
+    # than assumed safe.
+    #
+    # Reverted 0.10 -> 0.06 same day (2026-09-18), at the user's request, immediately
+    # after max_deep_markets (500->1500, full scan coverage) and top_n_recommendations
+    # (15->50) were both raised. Those two changes took the number of simultaneously-
+    # eligible recommendations from ~8-9 to 36+ measured live -- and since the loop has
+    # no daily loss cap or max-concurrent-positions limit (a deliberate omission, see
+    # CLAUDE.md's "Live order execution"), a higher per-bet cap combined with many more
+    # bets eligible to trigger in the same cycle meant materially more potential
+    # simultaneous exposure than existed when 0.10 was set a few hours earlier under the
+    # old ~8-9-rec regime. Back to the walk-forward-validated 0.06 rather than the
+    # unvalidated 0.10, restoring the original per-bet safety margin under the new,
+    # much wider scan/rec footprint.
     max_stake_pct: float = 0.06          # cap suggested stake at 6% of bankroll
 
     # --- Trade policy ---
     pregame_only: bool = True             # only recommend games in "Preview" (no live/final)
+
+    # --- In-game trading (added 2026-09-22) --------------------------------
+    # `pregame_only` and `in_game_trade` are deliberately SEPARATE switches:
+    #   pregame_only=False  -> fair value is estimated for in-progress games, so
+    #                          they appear in `rank`/`search` (what --allow-live
+    #                          has always done). Display/eligibility only.
+    #   in_game_trade=True  -> the T-minus trigger additionally accepts games
+    #                          that have ALREADY STARTED, so they can fire a real
+    #                          order. This is the one that risks money.
+    # Both are needed to actually trade a live game; `loop --in-game` sets both.
+    #
+    # MLB-ONLY IN PRACTICE. Only MLB has a live model (home_win_probability from
+    # the MLB Stats API, fair_source="live", confidence 0.80). NFL/NBA/NHL all
+    # explicitly refuse once a game starts ("no live NFL model yet"), returning
+    # prob=None -- and signals/recommendation.py now refuses to bet a started
+    # game with no fair value rather than falling through to a money-flow-only
+    # bet on a game whose score the model cannot see.
+    #
+    # UNVALIDATED. There is no backtest for this and effectively no history to
+    # build one from: across 252,687 recent snapshot rows exactly 18 carry
+    # fair_source="live", because pregame_only=True has suppressed them all
+    # along. CLAUDE.md asserts "live bets were the junk" but nothing in
+    # docs/research-log.md backs that up, so treat in-game as untested in BOTH
+    # directions rather than either proven bad or safe. Default off.
+    in_game_trade: bool = False           # `loop --live --in-game` turns this on
+    # 90 -> 40 on 2026-09-22, the same day, after backtest/in_game_backtest.py made
+    # this measurable for the first time. The sweep found a CLIFF, not a gradient:
+    # held-out VALIDATE ROI (net of fees) holds +0.23..+0.34 for every window <= 50
+    # min and collapses to ~+0.09 at 60, 75 and 90. Production's 90 sat well past
+    # that cliff, capturing the worst bets available.
+    #   window  25     30     35     40     50  |  60     75     90
+    #   TRAIN  .400   .357   .232   .246   .246 | .374   .351   .281
+    #   VALID  .307   .335   .238   .268   .251 | .094   .095   .077
+    # Chose 40 as the upper-middle of the flat 25-50 shelf rather than 30's
+    # single-point VALIDATE peak -- the same "prefer a shelf to a knife edge, and
+    # prefer the point with more data" discipline that picked max_stake_pct=0.06
+    # over 0.045. 40 carries n=22/28 vs 30's n=17/17.
+    # HONEST CAVEAT: against production's 90, 40 wins VALIDATE decisively
+    # (+0.268 vs +0.077) but is 3.5pts WORSE on TRAIN (+0.246 vs +0.281), so it
+    # does not pass a strict both-splits bar. TRAIN is non-monotone across the
+    # shelf (.400/.357/.232/.246/.246) at n=15-22, i.e. noise; VALIDATE is clean
+    # and monotone. 25 and 30 DO pass strictly if you want the conservative pick.
+    in_game_max_minutes: float = 40.0     # stop betting this long after first pitch
+    # Seeded at 8.0 by judgment, then swept (at max_minutes=45) and CONFIRMED:
+    #   edge    5.0    6.5    8.0    10.0   12.0
+    #   TRAIN  .114   .212   .246   .418   .091
+    #   VALID  .114   .166   .231   .185   .127
+    # 8.0 is the VALIDATE peak and sits mid-shelf (6.5/8/10 all +0.17..+0.23),
+    # so it's kept. Below 6.5 the bar lets in too much noise; above 10 the sample
+    # collapses and both splits fall.
+    in_game_min_edge_cents: float = 8.0
     paper_trade: bool = False             # (loop) paper-bet each game near its first pitch
     live_trade: bool = False              # (loop --live) submit REAL orders near first pitch --
                                           # see engine/live.py. No confirmation step; gated only
@@ -193,6 +321,42 @@ class Settings:
     # --- Order safety caps (used by the guarded `place` preview) ---
     max_order_contracts: int = 4000        # hard cap on contracts per order
     max_order_cost_usd: float = 1000.0     # hard cap on $ risked per order
+
+    # --- Maker mode (added 2026-09-22) -------------------------------------
+    # Rest orders on the book as a MAKER (post-only, priced at best_bid+1c)
+    # instead of crossing the spread and paying the taker fee, with a re-peg /
+    # timeout / taker-fallback lifecycle managed by engine/maker.py.
+    #
+    # DEFAULT OFF, and that default is evidence-based, not caution: the fee
+    # model added the same day (config/fees.py) let backtest/limit_entry.py be
+    # re-run with maker fees properly credited on every filled limit, over 289
+    # settled bets. Result -- taker ROI +0.0419 vs the best limit policy's
+    # -0.0114. Crediting maker fees narrowed taker's lead by only 0.46 ROI
+    # points (5.79 -> 5.33), because the fee saving (~0.6-1.2c/contract) is an
+    # order of magnitude smaller than what resting costs you: `save_c = -11.8c`,
+    # i.e. a limit anchored one cycle early fills ~12c WORSE than just waiting
+    # for the last-cycle ask. Entry prices drift down hard into game time and
+    # the last-minute taker already captures that drift. Notably this is NOT
+    # adverse selection (filled win% 0.625 vs missed 0.622 -- no selection
+    # effect at all); it is purely the cost of committing to a price early.
+    #
+    # What that backtest does NOT settle, and why this ships anyway: its
+    # `_simulate_fill()` anchors the limit ONCE and never moves it. The
+    # lifecycle below re-pegs every `maker_poll_seconds` as the book moves, so
+    # it FOLLOWS the falling ask instead of locking in a stale price, and would
+    # forfeit far less of that 11.8c. Snapshots are 20-30 min apart, so a 30s
+    # re-peg cadence is not simulable on this data at all -- it can only be
+    # measured live. Enable narrowly (MLB totals first: `fee_type: "quadratic"`
+    # means maker fills there are provably FREE, verified against two real
+    # maker fills on this account) and compare the live ledger against the
+    # paper one before trusting it broadly.
+    maker_mode: bool = False               # `loop --live --maker` turns this on
+    maker_poll_seconds: float = 30.0       # re-peg/fill-check cadence
+    maker_improve_cents: float = 1.0       # rest this far above the best bid
+    maker_taker_fallback_min: float = 5.0  # cross the spread at T-minus this many min
+    maker_max_repegs: int = 40             # churn guard: stop re-pricing after this many
+    maker_post_only: bool = True           # let the exchange reject would-be taker fills
+    maker_require_post_only: bool = False  # True = refuse to rest if post_only is rejected
 
     def base_url(self) -> str:
         return KALSHI_DEMO_BASE if self.use_demo else KALSHI_API_BASE

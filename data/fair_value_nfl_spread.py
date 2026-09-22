@@ -53,6 +53,38 @@ _MONTHS = {m: i for i, m in enumerate(
 MARGIN_PER_ELO = 0.0414
 MARGIN_SIGMA = 13.52
 
+# Key-number bumps (added 2026-09-17, at the user's request after reading
+# https://www.oddsshopper.com/articles/betting-101/nfl-key-numbers). NFL margins
+# cluster hard at exactly 3 and 7 (FG / TD+XP), which a smooth Normal cannot
+# represent. Measured directly against the same 7,292-game margin_samples()
+# history used for the OLS fit above: for each game, compared the ACTUAL rate
+# of margin==3/7 to what the shipped Normal(mu, MARGIN_SIGMA) predicts for that
+# integer bin (continuity-corrected: P(margin in [k-0.5, k+0.5])). Result was a
+# large, unambiguous excess at both numbers, roughly symmetric between the
+# favorite and underdog side (margin=+3: actual 8.13% vs model-implied 2.73%,
+# +5.41pp; margin=-3: 6.97% vs 2.58%, +4.39pp; margin=+7: 4.83% vs 2.58%,
+# +2.25pp; margin=-7: 4.20% vs 2.26%, +1.94pp) -- shipped as the average of the
+# +/- pair for each number rather than two separate constants, since the model
+# has no mechanism to predict which side of a game the asymmetry favors and the
+# gap is small relative to the bump itself.
+#
+# Every KXNFLSPREAD line is a positive half-integer K-0.5 (see parse_spread_ticker;
+# the underdog's own "+K.5" bet is the NO side of the FAVORITE's ticker, per
+# headline_for()'s reframing -- there is no negative-K ticker to handle). Covering
+# line=K-0.5 requires margin >= K, so the exact-margin excess at k=3/7 only needs
+# to be added to the survival probability at line=k-0.5 (2.5, 6.5): P(margin>=k)
+# gains the full excess mass at k, while P(margin>=k+1) (line=k+0.5, e.g. 3.5/7.5)
+# is untouched, since that boundary already excludes margin=k under the
+# continuous model too -- consistent by construction (sf(k-0.5) - sf(k+0.5) =
+# P(margin=k) exactly, so bumping only the lower boundary reproduces the measured
+# excess without needing to know where the compensating deficit sits elsewhere in
+# the distribution). This is also exactly the "-2.5 beats -3.5, +3.5 beats +2.5"
+# rule the user described -- it falls out of the bumped probabilities on its own
+# (line=2.5 gets a higher P(cover), and the NO side of line=3.5, i.e. "+3.5", is
+# left at the unbumped baseline while NO-of-2.5, i.e. "+2.5", is reduced by the
+# same bump) rather than needing a separate hardcoded preference rule.
+KEY_NUMBER_BUMP = {2.5: 0.049, 6.5: 0.021}
+
 
 @dataclass
 class ParsedNflSpread:
@@ -126,6 +158,9 @@ class NflSpreadFairValueModel:
         diff = (r_yes - r_opp) + (HOME_FIELD_ELO if pt.yes_is_home else -HOME_FIELD_ELO)
         mu = MARGIN_PER_ELO * diff
         prob_cover = normal_sf(pt.line, mu, MARGIN_SIGMA)
+        bump = KEY_NUMBER_BUMP.get(pt.line)
+        if bump:
+            prob_cover = min(1.0, prob_cover + bump)
         # Deliberately more conservative than the winner model's confidence shape
         # (0.35 base / 0.25 cap) -- this model is unvalidated, so its confidence
         # ceiling is capped lower until a real walk-forward pass exists.

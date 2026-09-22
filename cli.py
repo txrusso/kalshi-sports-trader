@@ -328,6 +328,57 @@ def cmd_whales(args) -> None:
     print(run_whales(settings, max_markets=args.max_markets, min_size=args.min_size))
 
 
+def cmd_fees(args) -> None:
+    """Audit config/fees.py against what Kalshi actually charged.
+
+    Two jobs. First, prove the fee model still matches reality -- Kalshi has
+    changed sports fee multipliers before, and a stale model would quietly
+    corrupt every maker-vs-taker comparison. Second, surface the MAKER rate on
+    `quadratic_with_maker_fees` series, which is the one number in the model
+    that is taken from published docs rather than measured, because no maker
+    fill has ever landed on such a series on this account."""
+    from config.fees import (audit_fills, fee_cents_per_contract, maker_saving_cents,
+                             series_fee_params, MAKER_RATE, TAKER_RATE)
+    settings = _settings_from(args)
+    client = KalshiClient(settings)
+    fills = client.get_fills(limit=1000)
+    a = audit_fills(fills, client)
+
+    print("FEE MODEL AUDIT")
+    print("=" * 62)
+    print(f"  fills examined : {a['n']}  ({a['n_taker']} taker, {a['n_maker']} maker)")
+    print(f"  total fees paid: ${a['total_fee']:.4f} on ${a['total_notional']:.2f} notional "
+          f"({100 * a['total_fee'] / a['total_notional']:.2f}%)" if a["total_notional"]
+          else "  no notional")
+    matched = a["n"] - len(a["mismatches"])
+    print(f"  model matches  : {matched}/{a['n']} exactly")
+    if a["mismatches"]:
+        print(f"\n{len(a['mismatches'])} fill(s) the model did not reproduce:")
+        for m in a["mismatches"][:10]:
+            ratio = (m["actual"] / m["predicted"]) if m["predicted"] else 0
+            print(f"    {m['ticker']:<36} {'taker' if m['is_taker'] else 'MAKER'} "
+                  f"C={m['count']:<5} P={m['price']:<5} "
+                  f"pred=${m['predicted']:.4f} actual=${m['actual']:.4f} ({ratio:.2f}x)")
+        if any(not m["is_taker"] for m in a["mismatches"]):
+            print("\nA MAKER mismatch is the important one: it means the real maker rate")
+            print("    differs from the assumed MAKER_RATE. Update config/fees.py.")
+
+    print("\nPER-SERIES FEE PARAMS + MAKER SAVING (at a 50c contract, per contract)")
+    print("-" * 62)
+    print(f"  {'series':<13} {'fee_type':<28} {'mult':>5} {'taker':>7} {'maker':>7} {'save':>7}")
+    for srs in settings.sport_series_prefixes:
+        tk = f"{srs}-PROBE"
+        ft, mult = series_fee_params(tk, client)
+        t = fee_cents_per_contract(0.50, tk, True, client)
+        mk = fee_cents_per_contract(0.50, tk, False, client)
+        flag = "  <- maker FREE" if mk == 0 else ""
+        print(f"  {srs:<13} {ft:<28} {mult:>5} {t:>6.3f}c {mk:>6.3f}c "
+              f"{maker_saving_cents(0.50, tk, client):>6.3f}c{flag}")
+    print(f"\ntaker rate {TAKER_RATE}, maker rate {MAKER_RATE} "
+          f"(maker rate is UNVERIFIED -- see config/fees.py)")
+
+
+
 def cmd_loop(args) -> None:
     # The loop is long-running and unattended, so it needs INFO-level visibility
     # (cycle completion, paper-trigger decisions, notification sends) -- the shared
@@ -340,13 +391,42 @@ def cmd_loop(args) -> None:
         settings = replace(settings, scan_interval_seconds=args.interval)
     if args.paper:
         settings = replace(settings, paper_trade=True)
+    if getattr(args, "maker", False) and not args.live:
+        print("--maker only applies with --live (it manages REAL resting orders); ignoring.")
+    if getattr(args, "in_game", False) and not args.live:
+        print("--in-game only applies with --live (it gates REAL in-game orders); ignoring.")
     if args.live:
-        settings = replace(settings, live_trade=True)
+        in_game = bool(getattr(args, "in_game", False))
+        settings = replace(settings, live_trade=True,
+                           maker_mode=bool(getattr(args, "maker", False)),
+                           in_game_trade=in_game,
+                           # In-game fair value is only produced when pregame_only is off;
+                           # both switches are required, so --in-game sets both.
+                           pregame_only=(settings.pregame_only and not in_game))
         print("\n" + "=" * 70)
         print("LIVE TRADING ENABLED — this will submit REAL orders with REAL money.")
         print(f"Environment: {'DEMO' if settings.use_demo else 'PRODUCTION'}")
         print(f"Per-order caps: <= {settings.max_order_contracts} contracts, "
              f"<= ${settings.max_order_cost_usd:,.0f} cost. No other limit.")
+        if settings.in_game_trade:
+            print("")
+            print(f"IN-GAME TRADING ON: games that have ALREADY STARTED stay eligible for "
+                  f"{settings.in_game_max_minutes:.0f} min after first pitch,")
+            print(f"  at a stiffer edge bar ({settings.in_game_min_edge_cents:.1f}c vs "
+                  f"{settings.min_edge_cents:.1f}c pregame).")
+            print("  MLB WINNER MARKETS ONLY -- NFL/NBA/NHL have no live model, and MLB")
+            print("  totals' expected_runs() is a full-game estimate; all are refused mid-game.")
+            print("  Backtested (backtest/in_game_backtest.py): n=50, TRAIN +0.246 / "
+                  "VALIDATE +0.268 net of fees.")
+        if settings.maker_mode:
+            print("")
+            print(f"MAKER MODE ON: orders REST on the book at best_bid+"
+                  f"{settings.maker_improve_cents:.0f}c (post-only), re-pegged every "
+                  f"{settings.maker_poll_seconds:.0f}s,")
+            print(f"  crossing to a taker order at T-{settings.maker_taker_fallback_min:.0f} "
+                  f"min if still unfilled. Ledger rows are written ON FILL.")
+            print("  NOTE: backtest says resting costs more entry price than it saves in "
+                  "fees (taker +0.0419 vs limit -0.0114).")
         print("=" * 70 + "\n")
     run_loop(settings)
 
@@ -555,6 +635,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--min-size", type=float, default=0.0, help="only show prints of >= N contracts")
     s.set_defaults(func=cmd_whales)
 
+    s = sub.add_parser("fees", help="audit the fee model against real fills; show maker savings")
+    s.set_defaults(func=cmd_fees)
+
     s = sub.add_parser("loop", help="continuous autonomous loop")
     s.add_argument("--interval", type=int, default=None, help="seconds between scans")
     s.add_argument("--paper", action="store_true",
@@ -562,6 +645,17 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--live", action="store_true",
                    help="LIVE: automatically submit real orders (real money, no confirmation) "
                         "on the last cycle before each game starts")
+    s.add_argument("--in-game", action="store_true",
+                   help="with --live: ALSO bet games that have already started (MLB only -- "
+                        "the other sports have no live model and are refused). Sets both "
+                        "pregame_only=False and in_game_trade=True. UNVALIDATED: there is no "
+                        "backtest for in-game entries and almost no history to build one from")
+    s.add_argument("--maker", action="store_true",
+                   help="with --live: REST orders on the book (post-only, best_bid+1c) and "
+                        "re-peg them instead of crossing the spread, falling back to a taker "
+                        "order shortly before each game starts. Saves the taker fee; costs "
+                        "entry price. See config/settings.py's maker_mode for the backtest "
+                        "that says this is NOT yet a win overall")
     s.set_defaults(func=cmd_loop)
 
     s = sub.add_parser("settle", help="grade the paper-trade ledger vs outcomes")
@@ -582,7 +676,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("ticker")
     s.add_argument("--side", choices=["yes", "no"], required=True)
     s.add_argument("--action", choices=["buy", "sell"], default="buy")
-    s.add_argument("--count", type=int, required=True, help="number of contracts")
+    s.add_argument("--count", type=float, required=True, help="number of contracts (fractional OK)")
     s.add_argument("--price", type=float, required=True, help="limit price in dollars (0-1)")
     s.add_argument("--confirm", action="store_true", help="actually submit (you run this)")
     s.set_defaults(func=cmd_place)

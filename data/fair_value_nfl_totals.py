@@ -34,6 +34,46 @@ _MONTHS = {m: i for i, m in enumerate(
 # against; MLB's own 2.37 raw measurement got adjusted to 2.2 by that process).
 NFL_TOTALS_PHI = 4.22
 
+# Key-number bumps for totals (added 2026-09-21, mirroring the spread model's
+# KEY_NUMBER_BUMP in data/fair_value_nfl_spread.py). NFL combined scores cluster
+# at certain sums for the same reason spreads cluster at 3/7: both teams' scores
+# are built from TD+XP=7 and FG=3 (plus occasional 2s/6s), so certain totals are
+# reachable by far more (team_a, team_b) scoreline combinations than others.
+# Online research (Action Network's 2015-2019 frequency table, covers.com's
+# "key ranges" writeup) flagged 37, 40/41, 43-44, 47, and 51 as the recurring
+# hot spots -- see:
+#   https://www.actionnetwork.com/nfl/nfl-key-betting-numbers-over-unders-totals-line-value
+#   https://www.covers.com/nfl/key-numbers
+# Rather than trust those blog numbers directly, re-measured the same way the
+# spread bump was: for every one of 7,287 completed nflverse games with a
+# scoreable game environment, compared the ACTUAL rate of total==k to what the
+# shipped NB(lam, NFL_TOTALS_PHI) predicts for that exact integer (pmf, not a
+# continuity-corrected bin -- totals are already integer-valued, no correction
+# needed). The two independent numbers-sources agree: every candidate the blogs
+# named came back with a clear, non-noisy excess here too (all >=0.6pp on
+# n=7,287, vs neighboring integers that are frequently negative/near-zero --
+# e.g. 41: actual 3.82% vs model-implied 2.69%, +1.13pp; 44: 3.72% vs 2.60%,
+# +1.12pp; 51: 3.77% vs 2.11%, +1.66pp -- full table in
+# scratchpad measure_totals_key_numbers.py output, 2026-09-21 run). Unlike the
+# spread bump there's no favorite/underdog side to average a +/- pair over (a
+# total has no direction), so each key number's own measured excess is used
+# directly. Every KXNFLTOTAL line is K-0.5 for a positive integer K (see
+# parse_total_ticker); nb_survival(int(line), lam, phi) = P(total > line) =
+# P(total >= K), so bumping the survival prob at line=K-0.5 by the excess mass
+# measured at total==K is exact, same reasoning as the spread bump's boundary
+# argument. UNVALIDATED against real Kalshi settlement/ROI, same caveat as
+# NFL_TOTALS_PHI and the spread bump at their own ship dates -- re-check once
+# real settled KXNFLTOTAL bets accumulate at these specific lines.
+KEY_NUMBER_BUMP = {
+    36.5: 0.0120,   # total == 37
+    39.5: 0.0064,   # total == 40
+    40.5: 0.0113,   # total == 41
+    42.5: 0.0084,   # total == 43
+    43.5: 0.0112,   # total == 44
+    46.5: 0.0077,   # total == 47
+    50.5: 0.0166,   # total == 51
+}
+
 
 @dataclass
 class ParsedNflTotal:
@@ -104,6 +144,9 @@ class NflTotalsFairValueModel:
                              game_state=game_state)
         lam = et["lam"]
         prob_over = nb_survival(int(pt.line), lam, NFL_TOTALS_PHI)
+        bump = KEY_NUMBER_BUMP.get(pt.line)
+        if bump:
+            prob_over = min(1.0, prob_over + bump)
 
         # Full team names for headline_for() (signals/recommendation.py), same
         # detail-dict keys MLB's totals model populates.

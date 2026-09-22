@@ -138,6 +138,20 @@ class OrderBook:
         return round(1.0 - nb, 4) if nb else 0.0
 
     @property
+    def best_no_ask(self) -> float:
+        """Cost to BUY NO now. Kalshi books only bids, so the NO ask is the
+        mirror of the best YES bid -- same no-tie convention the backtests use."""
+        yb = self.best_yes_bid
+        return round(1.0 - yb, 4) if yb else 0.0
+
+    def depth_at_or_above(self, side: str, price: float) -> float:
+        """Contracts resting at `price` or better on `side` -- the queue ahead of a
+        new bid at `price`. Used by engine/maker.py to see how thick the line is
+        before joining it."""
+        levels = self.yes_levels if side == "yes" else self.no_levels
+        return sum(s for p, s in levels if p >= price - 1e-9)
+
+    @property
     def mid(self) -> float:
         yb, ya = self.best_yes_bid, self.best_yes_ask
         if yb and ya:

@@ -416,11 +416,14 @@ def totals_prob(row, ing, p):
 
 def kelly_contracts(win_prob, cost, bankroll, kelly_fraction, max_stake_pct):
     if cost <= 0 or cost >= 1:
-        return 0.0, 0
+        return 0.0, 0.0
     f = max(0.0, (win_prob - cost) / (1 - cost)) * kelly_fraction
     f = min(f, max_stake_pct)
     stake = bankroll * f
-    return round(stake, 2), int(stake / cost) if cost > 0 else 0
+    # Mirrors signals/recommendation.py::_kelly_contracts -- production sizes to
+    # the full Kelly stake using Kalshi's fractional (0.01-granularity) contracts
+    # rather than flooring to a whole contract (changed 2026-09-17).
+    return round(stake, 2), round(stake / cost, 2) if cost > 0 else 0.0
 
 
 def simulate(cache: dict, params: dict, split: str = "all", start_bankroll: float = 20.0,

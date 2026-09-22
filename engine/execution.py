@@ -38,7 +38,7 @@ class OrderRequest:
     ticker: str
     side: str                 # "yes" | "no"
     action: str = "buy"       # "buy" | "sell"
-    count: int = 0
+    count: float = 0.0
     limit_price: float = 0.0  # dollars, 0..1
 
 
@@ -116,11 +116,18 @@ def preview_order(client: KalshiClient, req: OrderRequest, settings: Settings = 
 
 
 def submit_order(client: KalshiClient, req: OrderRequest, settings: Settings = DEFAULTS,
-                  client_order_id: Optional[str] = None) -> OrderResult:
+                  client_order_id: Optional[str] = None,
+                  post_only: bool = False) -> OrderResult:
     """Places a REAL order. Raises ExecutionDisabled if preview_order() finds
     any problem (bad side/action/count, price out of range, over a cap,
     market not tradeable, or insufficient balance) — nothing is sent in that
     case. Raises KalshiError on a network/API failure during submission.
+
+    `post_only=True` (engine/maker.py) asks the exchange to REJECT the order
+    outright if it would cross and execute as a taker, rather than filling it.
+    That rejection surfaces here as a KalshiError and is an expected, benign
+    outcome for a maker order -- it means the book moved and the price needs
+    re-reading, not that anything is broken.
 
     `client_order_id` should be stable per intended order (not random) when
     the caller might retry — e.g. engine/live.py derives it from the game's
@@ -135,6 +142,7 @@ def submit_order(client: KalshiClient, req: OrderRequest, settings: Settings = D
     raw = client.create_order(
         ticker=req.ticker, side=req.side, action=req.action,
         count=req.count, limit_price=req.limit_price, client_order_id=coid,
+        post_only=post_only,
     )
     # v2 create-order response is flat -- {order_id, client_order_id, fill_count,
     # remaining_count, ts_ms} -- and carries no "status" field (unlike the old,

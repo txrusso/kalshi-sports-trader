@@ -528,9 +528,115 @@ def cmd_settle(args) -> None:
                   f"(first pitch {fp_et:%Y-%m-%d %I:%M %p} ET)")
 
     if getattr(args, "notify", False):
-        from engine.notify import SmsNotifier
-        SmsNotifier().send(summary)
-        print(f"\n[texted summary: {summary}]")
+        from engine.notify import SmsNotifier, flush
+        queued = SmsNotifier().send(summary)
+        # send() is asynchronous now (the dispatcher paces and retries), and this
+        # is a short-lived process — block until the attempt has actually been
+        # made so the printed line reflects reality rather than an intention.
+        flush()
+        if queued:
+            print(f"\n[texted summary: {summary}]")
+            print("[SMS is a best-effort carrier gateway -- see logs/notifications.jsonl "
+                  "for the real send time, and `cli.py notify-test` if it never arrives]")
+        else:
+            print("\n[text NOT sent: notify_config.txt is missing SMTP settings]")
+
+
+def cmd_notify_test(args) -> None:
+    """Diagnose the alert channels end to end, and show the recent send history.
+
+    Exists because the failure this was written for is invisible from the loop
+    log: every text reported success while some never arrived and some landed
+    ~12 hours later. That gap is real -- an SMTP send only proves Gmail accepted
+    the message, not that Verizon's gateway did anything with it -- so the two
+    useful things to show are (a) whether each transport accepts a message right
+    now, synchronously and with the real error if not, and (b) when past alerts
+    actually left this machine, which is what turns "late text" from a guess
+    into something checkable against the carrier."""
+    import json as _json
+    from datetime import datetime as _dt
+
+    from engine.notify import (AUDIT_LOG, PushNotifier, SmsNotifier, _audit,
+                               kalshi_market_url)
+
+    stamp = datetime.now(EASTERN).strftime("%Y-%m-%d %I:%M:%S %p ET")
+    sms, push = SmsNotifier(), PushNotifier()
+
+    print("NOTIFICATION CHANNELS")
+    print(f"  config      : {sms.path}")
+    print(f"  SMS         : {'configured' if sms.enabled else 'NOT CONFIGURED'}"
+          f"  -> {', '.join(sms.recipients) or '(no recipients)'}")
+    print(f"  ntfy push   : {'configured' if push.enabled else 'NOT CONFIGURED'}"
+          f"  -> {push.server}/{push.topic or '(no topic)'}")
+
+    if not args.history_only:
+        print("\nSending one test alert per channel (synchronously, so a failure "
+              "shows its real error)...")
+        if push.enabled:
+            slip = {"title": "KALSHI notify-test",
+                    "body": f"ntfy push test sent {stamp}.\nIf you can read this, push works.",
+                    "url": kalshi_market_url("KXMLBGAME-TEST-TEST"),
+                    "tags": "white_check_mark", "priority": "high"}
+            # send_now() is the raw transport and doesn't audit (the dispatcher
+            # normally does that), so record the test attempt here -- otherwise
+            # the one send the user made deliberately is the one send missing
+            # from the history this command prints.
+            try:
+                push.send_now(slip)
+                _audit("push", push.topic, True, 1, "notify-test", slip["body"])
+                print("  push : OK (ntfy returned 2xx -- this channel is confirmed)")
+            except Exception as e:
+                _audit("push", push.topic, False, 1, f"notify-test: {type(e).__name__}: {e}",
+                       slip["body"])
+                print(f"  push : FAILED -- {type(e).__name__}: {e}")
+        else:
+            print("  push : skipped (ntfy_topic is blank in notify_config.txt)")
+
+        if sms.enabled:
+            for rcpt in sms.recipients:
+                body = sms.clip(f"KALSHI notify-test {stamp}. Reply not needed.")
+                try:
+                    sms.send_now(body, rcpt)
+                    _audit("sms", rcpt, True, 1, "notify-test", body)
+                    print(f"  sms  : {rcpt} -- Gmail ACCEPTED it. That is all an SMTP "
+                          f"send can prove; the carrier gateway may still drop or "
+                          f"delay it, so check the handset.")
+                except Exception as e:
+                    _audit("sms", rcpt, False, 1, f"notify-test: {type(e).__name__}: {e}", body)
+                    print(f"  sms  : {rcpt} -- FAILED: {type(e).__name__}: {e}")
+        else:
+            print("  sms  : skipped (notify_config.txt is missing SMTP settings)")
+
+    print(f"\nRECENT SEND HISTORY ({AUDIT_LOG})")
+    if not AUDIT_LOG.exists():
+        print("  (no attempts recorded yet -- the audit log starts from this build)")
+        return
+    rows = []
+    for line in AUDIT_LOG.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            rows.append(_json.loads(line))
+        except ValueError:
+            continue
+    if not rows:
+        print("  (empty)")
+        return
+    print(f"  {'when (local)':<22} {'ch':<5} {'ok':<4} {'try':<4} target / detail")
+    for r in rows[-args.limit:]:
+        when = r.get("ts_local", r.get("ts_utc", ""))
+        try:
+            when = _dt.fromisoformat(when).astimezone(EASTERN).strftime("%m-%d %I:%M:%S %p")
+        except (TypeError, ValueError):
+            pass
+        ok = "yes" if r.get("accepted") else "NO"
+        tail = r.get("target", "")
+        if not r.get("accepted"):
+            tail += f"  <- {r.get('detail', '')}"
+        print(f"  {when:<22} {r.get('channel', ''):<5} {ok:<4} {r.get('attempt', ''):<4} {tail}")
+    n_sms = sum(1 for r in rows if r.get("channel") == "sms")
+    n_fail = sum(1 for r in rows if r.get("channel") == "sms" and not r.get("accepted"))
+    print(f"\n  {len(rows)} attempts recorded ({n_sms} SMS, {n_fail} of those rejected "
+          f"by Gmail). A text that never arrived despite 'ok=yes' here was lost or "
+          f"deferred by the carrier AFTER it left this machine.")
 
 
 def cmd_calibration(args) -> None:
@@ -657,6 +763,14 @@ def build_parser() -> argparse.ArgumentParser:
                         "entry price. See config/settings.py's maker_mode for the backtest "
                         "that says this is NOT yet a win overall")
     s.set_defaults(func=cmd_loop)
+
+    s = sub.add_parser("notify-test",
+                       help="test the SMS/push alert channels and show recent send history")
+    s.add_argument("--history-only", action="store_true",
+                   help="don't send anything; just print the audit log")
+    s.add_argument("--limit", type=int, default=25,
+                   help="how many past attempts to show (default 25)")
+    s.set_defaults(func=cmd_notify_test)
 
     s = sub.add_parser("settle", help="grade the paper-trade ledger vs outcomes")
     s.add_argument("date", nargs="?", default=None, help="filter to games on YYYY-MM-DD")

@@ -1,5 +1,10 @@
 # Copy to notify_config.txt (gitignored) and fill in. Both channels are optional
 # and independent -- leave either side blank and those alerts are skipped silently.
+#
+# Which channel to trust: ntfy push. It is an HTTP API that returns a real
+# status code, so a failure is visible and retryable. The SMS gateway below is
+# a BACKUP -- email-to-SMS has no delivery receipt, no SLA, and carriers drop
+# or defer messages silently. See engine/notify.py's module docstring.
 
 # --- Text messages, via a carrier email-to-SMS gateway -----------------------
 # Any SMTP sender works. Gmail needs an App Password, not the account password.
@@ -9,6 +14,12 @@ sender_email = you@gmail.com
 sender_password = your_app_password_here
 # Your number at your carrier's SMS gateway, e.g. 5551234567@vtext.com (Verizon),
 # @txt.att.net (AT&T), @tmomail.net (T-Mobile).
+#
+# This may be a COMMA-SEPARATED LIST, and each address gets its own paced
+# message. Useful when one gateway is flaky: pairing Verizon's SMS gateway with
+# its MMS gateway (@vzwpix.com, a different delivery path) or with a plain
+# inbox gives a second chance at seeing the alert. Example:
+#   recipient = 5551234567@vtext.com, 5551234567@vzwpix.com
 recipient = 5551234567@example.com
 
 # --- Push notifications, via ntfy.sh ----------------------------------------
@@ -17,3 +28,29 @@ recipient = 5551234567@example.com
 # read it, so don't make it guessable.
 ntfy_topic =
 ntfy_server = https://ntfy.sh
+
+# --- Delivery tuning (all optional; the defaults shown are what the code uses) ---
+# Added 2026-09-22, after texts turned out to be arriving intermittently and
+# sometimes ~12 hours late. The cause was bursts: when one scan cycle triggered
+# several games, every text went out in the same second, which is what carrier
+# gateways rate-limit. Alerts are now serialized and paced.
+
+# Minimum seconds between two consecutive texts. The single most important knob
+# here -- raise it if texts still go missing when several games trigger at once.
+# sms_min_gap_seconds = 15
+
+# Same, for ntfy push. Push is reliable, so this is just politeness.
+# push_min_gap_seconds = 1
+
+# Attempts per message before giving up, and the first retry delay (it doubles
+# each attempt: 20s, 40s, 80s). Set max_attempts = 1 for the old no-retry behaviour.
+# max_attempts = 4
+# retry_backoff_seconds = 20
+
+# Texts longer than this are cut at a word boundary with an ellipsis. Gateways
+# truncate silently and mid-word otherwise; 150 leaves room under the 160-char
+# GSM limit for the gateway's own prefix.
+# sms_max_chars = 150
+
+# How long a process waits on exit for queued alerts to finish sending.
+# shutdown_flush_seconds = 90

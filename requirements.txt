@@ -3,3 +3,5 @@ requests>=2.31
 pandas>=2.0
 python-dateutil>=2.8
 matplotlib>=3.8
+textual>=0.80        # live terminal dashboard (run_dashboard.py)
+rich>=13.7           # colored cell rendering inside the dashboard

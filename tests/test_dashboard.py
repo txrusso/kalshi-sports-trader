@@ -23,7 +23,7 @@ from run_dashboard import (  # noqa: E402
     fmt_duration, fmt_start_offset, load_scan, mark_pending, name_cell,
     name_column_width, pending_bets, record_card, record_text, short_source,
     sport_records, _mode_from_args, signed, truncate,
-    bet_eta, fmt_clock, game_key, group_recs, placed_events, rec_start,
+    bet_eta, bet_side_prob, fmt_clock, game_key, group_recs, placed_events, rec_start,
 )
 from engine.account_summary import _grade          # noqa: E402
 from kalshi.normalize import position_size         # noqa: E402
@@ -524,6 +524,32 @@ class BetEta(unittest.TestCase):
         out = placed_events(rows)
         self.assertEqual(set(out["live"]), {"A"})
         self.assertEqual(set(out["paper"]), {"B"})
+
+
+
+class BetSideFair(unittest.TestCase):
+    """FAIR shows the probability the BET wins, not P(YES)."""
+
+    def test_yes_bet_reads_straight_through(self):
+        self.assertAlmostEqual(bet_side_prob({"side": "YES", "fair_prob": 0.626}), 0.626)
+
+    def test_no_bet_is_flipped(self):
+        # ATL/GB Under 43.5: P(over)=43.47% -> the under bet wins 56.53%.
+        self.assertAlmostEqual(bet_side_prob({"side": "NO", "fair_prob": 0.4347}), 0.5653)
+
+    def test_no_model_stays_none(self):
+        self.assertIsNone(bet_side_prob({"side": "NO", "fair_prob": None}))
+
+    def test_fair_minus_price_is_the_edge_on_every_real_row(self):
+        scan = load_scan(LATEST)
+        if scan is None:
+            self.skipTest("no production scan file")
+        for r in scan.recs:
+            p = bet_side_prob(r)
+            if p is None or r.get("edge_cents") is None:
+                continue
+            self.assertAlmostEqual((p - float(r["entry_price"])) * 100,
+                                   float(r["edge_cents"]), delta=0.02, msg=r["ticker"])
 
 
 if __name__ == "__main__":

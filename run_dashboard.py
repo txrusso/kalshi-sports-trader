@@ -143,6 +143,20 @@ def flow_components(rec: dict) -> tuple[Optional[float], Optional[float], Option
     return float(m.group(1)), float(m.group(2)), float(m.group(3))
 
 
+def bet_side_prob(rec: dict) -> Optional[float]:
+    """The model's probability that the BET wins, not P(YES).
+
+    `fair_prob` is always P(YES), so on a NO bet (every Under, and a winner bet
+    placed as NO on the opponent's ticker) it reads backwards next to the price
+    actually paid. Flipping it here makes FAIR - PX equal EDGE on every row.
+    """
+    fair = rec.get("fair_prob")
+    if fair is None:
+        return None
+    fair = float(fair)
+    return 1.0 - fair if str(rec.get("side") or "").upper() == "NO" else fair
+
+
 def calibration_mult(rec: dict) -> Optional[float]:
     """Confidence calibration multiplier: debug carries it at full precision,
     the rationale string is the fallback for older rows."""
@@ -967,7 +981,7 @@ class DashboardApp(App):
                       now: datetime, next_scan: Optional[datetime]) -> list[Text]:
         book, trades, oi = flow_components(r)
         cal = calibration_mult(r)
-        fair = r.get("fair_prob")
+        fair = bet_side_prob(r)
 
         model = Text(short_source(r.get("fair_source")), style=WHITE)
         if cal is not None:

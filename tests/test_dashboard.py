@@ -23,9 +23,11 @@ from run_dashboard import (  # noqa: E402
     fmt_duration, fmt_start_offset, load_scan, mark_pending, name_cell,
     name_column_width, pending_bets, record_card, record_text, short_source,
     sport_records, _mode_from_args, signed, truncate,
+    bet_eta, fmt_clock, game_key, group_recs, placed_events, rec_start,
 )
 from engine.account_summary import _grade          # noqa: E402
 from kalshi.normalize import position_size         # noqa: E402
+from config.settings import DEFAULTS                # noqa: E402
 
 # A real row out of output/recommendations_latest.json, trimmed to the fields
 # the dashboard reads. The rationale string is verbatim from the loop.
@@ -390,6 +392,139 @@ class SourceLabel(unittest.TestCase):
     def test_missing_source(self):
         self.assertEqual(short_source(""), "flow-only")
         self.assertEqual(short_source(None), "flow-only")
+
+
+UTC = timezone.utc
+DEFAULTS_IN_GAME = DEFAULTS.in_game_max_minutes
+
+
+class SportSections(unittest.TestCase):
+    """Signals are grouped by sport, soonest game first."""
+
+    def _rec(self, ticker, edge=5.0, game_dt=None):
+        return {"ticker": ticker, "edge_cents": edge, "game_datetime": game_dt}
+
+    def test_mlb_start_comes_from_the_ticker_not_the_skewed_market_time(self):
+        # 19:40 ET in the ticker; Kalshi's occurrence_datetime says 22:40 ET.
+        r = self._rec("KXMLBTOTAL-26SEP231940MIACHC-7", game_dt="2026-09-24T02:40:00+00:00")
+        start, trusted = rec_start(r, {})
+        self.assertEqual(start, datetime(2026, 9, 23, 23, 40, tzinfo=UTC))
+        self.assertTrue(trusted)
+
+    def test_nfl_prefers_the_schedule_and_flags_the_fallback(self):
+        r = self._rec("KXNFLTOTAL-26SEP27MINTB-45", game_dt="2026-09-27T23:05:00+00:00")
+        kickoff = datetime(2026, 9, 27, 20, 5, tzinfo=UTC)
+        self.assertEqual(rec_start(r, {r["ticker"]: kickoff}), (kickoff, True))
+        start, trusted = rec_start(r, {})
+        self.assertEqual(start, datetime(2026, 9, 27, 23, 5, tzinfo=UTC))
+        self.assertFalse(trusted)
+
+    def test_game_key_ties_a_games_markets_together(self):
+        self.assertEqual(game_key("KXNFLSPREAD-26SEP27MINTB-MIN3"), "26SEP27MINTB")
+        self.assertEqual(game_key("KXNFLGAME-26SEP27MINTB-MIN"), "26SEP27MINTB")
+
+    def test_sports_ordered_by_their_earliest_game_rows_by_start(self):
+        recs = [
+            self._rec("KXNFLGAME-26SEP27MINTB-MIN"),
+            self._rec("KXMLBTOTAL-26SEP231940MIACHC-7"),
+            self._rec("KXMLBTOTAL-26SEP231310WSHDET-8"),
+            self._rec("KXNFLTOTAL-26SEP24ATLGB-44"),
+        ]
+        sched = {"KXNFLGAME-26SEP27MINTB-MIN": datetime(2026, 9, 27, 20, 5, tzinfo=UTC),
+                 "KXNFLTOTAL-26SEP24ATLGB-44": datetime(2026, 9, 25, 0, 15, tzinfo=UTC)}
+        groups = group_recs(recs, sched)
+        self.assertEqual([s for s, _ in groups], ["MLB", "NFL"])
+        self.assertEqual([r["ticker"] for r, _, _ in groups[0][1]],
+                         ["KXMLBTOTAL-26SEP231310WSHDET-8", "KXMLBTOTAL-26SEP231940MIACHC-7"])
+        self.assertEqual([r["ticker"] for r, _, _ in groups[1][1]],
+                         ["KXNFLTOTAL-26SEP24ATLGB-44", "KXNFLGAME-26SEP27MINTB-MIN"])
+
+    def test_nfl_first_when_its_game_is_sooner(self):
+        recs = [self._rec("KXMLBTOTAL-26SEP251940MIACHC-7"),
+                self._rec("KXNFLTOTAL-26SEP24ATLGB-44")]
+        sched = {"KXNFLTOTAL-26SEP24ATLGB-44": datetime(2026, 9, 25, 0, 15, tzinfo=UTC)}
+        self.assertEqual([s for s, _ in group_recs(recs, sched)], ["NFL", "MLB"])
+
+    def test_same_start_keeps_each_game_together_biggest_edge_first(self):
+        t = datetime(2026, 9, 27, 17, 0, tzinfo=UTC)
+        tickers = ["KXNFLTOTAL-26SEP27NEJAC-46", "KXNFLSPREAD-26SEP27CINPIT-PIT3",
+                   "KXNFLGAME-26SEP27NEJAC-JAC", "KXNFLTOTAL-26SEP27CINPIT-41"]
+        edges = [22.8, 17.7, 8.0, 5.7]
+        recs = [self._rec(tk, e) for tk, e in zip(tickers, edges)]
+        rows = group_recs(recs, {tk: t for tk in tickers})[0][1]
+        self.assertEqual([r["ticker"] for r, _, _ in rows],
+                         ["KXNFLSPREAD-26SEP27CINPIT-PIT3", "KXNFLTOTAL-26SEP27CINPIT-41",
+                          "KXNFLTOTAL-26SEP27NEJAC-46", "KXNFLGAME-26SEP27NEJAC-JAC"])
+
+    def test_unknown_start_sinks_to_the_bottom_not_a_crash(self):
+        recs = [self._rec("KXNBAGAME-26OCT20BOSNYK-BOS"),
+                self._rec("KXNBAGAME-26OCT21LALGSW-LAL", game_dt="2026-10-22T02:00:00+00:00")]
+        rows = group_recs(recs, {})[0][1]
+        self.assertEqual(rows[-1][0]["ticker"], "KXNBAGAME-26OCT20BOSNYK-BOS")
+        self.assertIsNone(rows[-1][1])
+
+    def test_clock_format(self):
+        now = datetime(2026, 9, 23, 15, 0, tzinfo=UTC)            # 11:00a ET Wed
+        self.assertEqual(fmt_clock(datetime(2026, 9, 23, 23, 40, tzinfo=UTC), now), "7:40p")
+        self.assertEqual(fmt_clock(datetime(2026, 9, 27, 17, 0, tzinfo=UTC), now), "Sun 1:00p")
+        self.assertEqual(fmt_clock(datetime(2026, 10, 4, 17, 0, tzinfo=UTC), now), "10/4 1:00p")
+        self.assertEqual(fmt_clock(datetime(2026, 9, 23, 16, 5, tzinfo=UTC), now), "12:05p")
+
+
+class BetEta(unittest.TestCase):
+    """When the loop will place a bet: first scan at/after start - (interval/60 + 15)."""
+    NOW = datetime(2026, 9, 23, 15, 23, tzinfo=UTC)
+    NEXT = datetime(2026, 9, 23, 15, 31, tzinfo=UTC)
+    REC = {"ticker": "KXMLBTOTAL-26SEP231940MIACHC-7", "suggested_contracts": 2.0,
+           "fair_source": "pregame_totals"}
+
+    def _eta(self, start, mode="LIVE + IN-GAME", placed=None, rec=None):
+        return bet_eta(rec or self.REC, start, self.NOW, self.NEXT, 600, mode,
+                       placed or {"live": {}, "paper": {}})
+
+    def test_projects_onto_the_scan_grid(self):
+        # 7:40p ET start -> window opens 7:15p; scans at :31/:41/... -> 7:21p ET.
+        kind, when = self._eta(datetime(2026, 9, 23, 23, 40, tzinfo=UTC))
+        self.assertEqual(kind, "eta")
+        self.assertEqual(when, datetime(2026, 9, 23, 23, 21, tzinfo=UTC))
+
+    def test_window_already_open_means_the_next_scan(self):
+        self.assertEqual(self._eta(datetime(2026, 9, 23, 15, 45, tzinfo=UTC)),
+                         ("eta", self.NEXT))
+
+    def test_already_placed_in_the_ledger_the_loop_checks(self):
+        ts = datetime(2026, 9, 23, 15, 0, tzinfo=UTC)
+        start = datetime(2026, 9, 23, 23, 40, tzinfo=UTC)
+        placed = {"live": {"KXMLBTOTAL-26SEP231940MIACHC": ts}, "paper": {}}
+        self.assertEqual(self._eta(start, placed=placed), ("placed", ts))
+        # A PAPER row does not stop a LIVE loop from betting.
+        placed = {"live": {}, "paper": {"KXMLBTOTAL-26SEP231940MIACHC": ts}}
+        self.assertEqual(self._eta(start, placed=placed)[0], "eta")
+
+    def test_zero_contracts_never_fires(self):
+        rec = {**self.REC, "suggested_contracts": 0}
+        self.assertEqual(self._eta(datetime(2026, 9, 23, 23, 40, tzinfo=UTC), rec=rec)[0], "none")
+
+    def test_recommend_only_never_places(self):
+        self.assertEqual(self._eta(datetime(2026, 9, 23, 23, 40, tzinfo=UTC),
+                                   mode="RECOMMEND-ONLY")[0], "none")
+
+    def test_started_game_only_with_in_game_and_a_live_model(self):
+        started = datetime(2026, 9, 23, 15, 0, tzinfo=UTC)
+        live = {**self.REC, "fair_source": "live"}
+        self.assertEqual(self._eta(started, rec=live), ("now", self.NEXT))
+        self.assertEqual(self._eta(started, rec=live, mode="LIVE")[0], "none")
+        self.assertEqual(self._eta(started)[0], "none")                  # pregame model
+        long_ago = self.NOW - timedelta(minutes=DEFAULTS_IN_GAME + 1)
+        self.assertEqual(self._eta(long_ago, rec=live)[0], "none")
+
+    def test_placed_events_keeps_the_ledgers_apart(self):
+        rows = [{"event_key": "A", "ts": "2026-09-23T15:00:00+00:00", "order_id": "x"},
+                {"event_key": "B", "ts": "2026-09-23T16:00:00+00:00"}]
+        out = placed_events(rows)
+        self.assertEqual(set(out["live"]), {"A"})
+        self.assertEqual(set(out["paper"]), {"B"})
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

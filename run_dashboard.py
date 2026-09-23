@@ -105,6 +105,7 @@ class AccountData:
     open_positions: Optional[int] = None
     pending: list[dict] = field(default_factory=list)
     unrealized: Optional[float] = None
+    placed: dict[str, dict[str, datetime]] = field(default_factory=dict)
     error: str = ""
 
 
@@ -310,6 +311,7 @@ def load_account() -> AccountData:
         data.today_by_sport = sport_records(today_bets, outcomes, _grade)
         data.overall_by_sport = sport_records(bets, outcomes, _grade)
         data.pending = pending_bets(bets, outcomes)
+        data.placed = placed_events(bets)
     except Exception as e:
         errs.append(f"ledger: {e}")
 
@@ -397,6 +399,145 @@ def parse_utc(value: Any) -> Optional[datetime]:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
+def placed_events(bets: list[dict]) -> dict[str, dict[str, datetime]]:
+    """{"live"/"paper": {event_key: when it was placed}} from the ledger rows.
+
+    Kept per ledger because the loop only checks its OWN ledger before betting
+    (live mode reads live_ledger.jsonl, paper mode paper_ledger.jsonl), so a row
+    in the other one does not stop a bet from firing.
+    """
+    out: dict[str, dict[str, datetime]] = {"live": {}, "paper": {}}
+    for b in bets:
+        key, ts = b.get("event_key"), parse_utc(b.get("ts"))
+        if key and ts:
+            src = "live" if b.get("order_id") else "paper"
+            out[src][key] = min(ts, out[src].get(key, ts))
+    return out
+
+
+def resolve_schedule_starts(tickers: list[str]) -> dict[str, datetime]:
+    """Real kickoff / puck-drop for NFL and NHL tickers, via the same schedule
+    lookup the loop's trigger uses (data/games.py::match_game).
+
+    Needed because those tickers carry no time of day, and the market's own
+    `game_datetime` (Kalshi's occurrence_datetime) runs a documented +3h late
+    on NFL -- sorting on it would be right, but the START column would lie.
+    Slow on a cold cache, so the app calls this off the UI thread. Any failure
+    just leaves that ticker out, and rec_start falls back.
+    """
+    from data.games import match_game
+    from data.nfl_data import NflDataClient
+    from data.nhl_data import NhlDataClient
+
+    wanted = [t for t in tickers if sport_of(t) in ("nfl", "nhl")]
+    if not wanted:
+        return {}
+    clients = {"nfl": NflDataClient(), "nhl": NhlDataClient()}
+    cache: dict = {}
+    out: dict[str, datetime] = {}
+    for t in wanted:
+        try:
+            g = match_game(t, clients, cache)
+        except Exception:
+            continue
+        if g is not None and g.game_datetime is not None:
+            out[t] = g.game_datetime
+    return out
+
+
+def rec_start(rec: dict, sched: dict[str, datetime]) -> tuple[Optional[datetime], bool]:
+    """(UTC start time, trusted?) for one recommendation.
+
+    Same preference order as engine/paper.py::iter_trigger_candidates, so the
+    time shown is the time the loop is actually counting down to: MLB's ticker
+    time, then the NFL/NHL schedule, then Kalshi's occurrence_datetime. That
+    last one is only trusted for NBA (which has no other source, and is what the
+    loop uses too); for NFL/NHL it is the known-skewed fallback, flagged so the
+    START column can mark it.
+    """
+    from engine.paper import first_pitch_from_ticker
+
+    ticker = rec.get("ticker") or ""
+    fp = first_pitch_from_ticker(ticker)
+    if fp is not None:
+        return fp, True
+    if ticker in sched:
+        return sched[ticker], True
+    return parse_utc(rec.get("game_datetime")), sport_of(ticker) == "nba"
+
+
+def game_key(ticker: str) -> str:
+    """'KXNFLSPREAD-26SEP27MINTB-MIN3' -> '26SEP27MINTB': the game itself, shared
+    by its winner, total and spread markets so they sort next to each other."""
+    parts = (ticker or "").split("-")
+    return parts[1] if len(parts) > 1 else ticker or ""
+
+
+def group_recs(recs: list[dict], sched: dict[str, datetime]
+               ) -> list[tuple[str, list[tuple[dict, Optional[datetime], bool]]]]:
+    """Recommendations grouped by sport, soonest game first.
+
+    Sports are ordered by their earliest game; within a sport, by start time,
+    then by game (so a game's spread/total/winner stay together), then biggest
+    edge first. A rec with no resolvable start sinks to the bottom of its sport.
+    """
+    far = datetime.max.replace(tzinfo=timezone.utc)
+    by: dict[str, list[tuple[dict, Optional[datetime], bool]]] = {}
+    for r in recs:
+        start, trusted = rec_start(r, sched)
+        by.setdefault(sport_of(r.get("ticker") or ""), []).append((r, start, trusted))
+    for rows in by.values():
+        rows.sort(key=lambda x: (x[1] or far, game_key(x[0].get("ticker") or ""),
+                                 -float(x[0].get("edge_cents") or 0.0)))
+    return sorted(((sport.upper(), rows) for sport, rows in by.items()),
+                  key=lambda s: (s[1][0][1] or far, s[0]))
+
+
+def bet_eta(rec: dict, start: Optional[datetime], now: datetime,
+            next_scan: Optional[datetime], interval: int, mode: str,
+            placed: dict[str, dict[str, datetime]],
+            settings=DEFAULTS) -> tuple[str, Optional[datetime]]:
+    """When the loop will place this bet: (kind, time).
+
+    kind is "placed" (already in the ledger the loop checks), "eta" (projected),
+    "now" (eligible on the very next scan), or "none" with a short reason in
+    place of a time. The projection mirrors engine/loop.py + engine/paper.py:
+    a pregame bet fires on the first scan at or after
+    start - (interval/60 + paper_trigger_buffer_min) minutes, and scans land
+    every `interval` seconds from the next one. It is only a projection -- the
+    bet fires only if the recommendation still clears every gate on that scan.
+    """
+    event_key = (rec.get("ticker") or "").rsplit("-", 1)[0]
+    if "LIVE" in mode:
+        ledgers = [placed.get("live", {})]
+    elif "PAPER" in mode:
+        ledgers = [placed.get("paper", {})]
+    elif "RECOMMEND" in mode:
+        return "none", None                    # recommend-only never places
+    else:
+        ledgers = [placed.get("live", {}), placed.get("paper", {})]
+    for ledger in ledgers:
+        if event_key in ledger:
+            return "placed", ledger[event_key]
+    if float(rec.get("suggested_contracts") or 0) <= 0 or start is None:
+        return "none", None
+    window = timedelta(minutes=interval / 60.0 + settings.paper_trigger_buffer_min)
+    if start <= now:
+        # In-game: only MLB winners with a live model, only in --in-game mode,
+        # only for in_game_max_minutes after first pitch.
+        if ("IN-GAME" in mode and rec.get("fair_source") == "live"
+                and now - start <= timedelta(minutes=settings.in_game_max_minutes)):
+            return "now", next_scan
+        return "none", None
+    target = start - window
+    if next_scan is None:
+        return "eta", max(target, now)
+    if target <= next_scan:
+        return "eta", next_scan
+    steps = -(-(target - next_scan).total_seconds() // interval)    # ceil
+    return "eta", next_scan + timedelta(seconds=steps * interval)
+
+
 # --------------------------------------------------------------------------
 # formatting helpers
 # --------------------------------------------------------------------------
@@ -437,6 +578,45 @@ def fmt_start_offset(start: Optional[datetime]) -> Text:
     if delta > 0:
         return Text(f"in {fmt_duration(delta)}", style=WHITE)
     return Text(f"live {fmt_duration(-delta)}", style=YELLOW)
+
+
+def fmt_clock(dt: datetime, now: datetime, with_day: bool = True) -> str:
+    """'7:40p' today (ET), 'Sun 1:00p' within the week, '10/4 1:00p' beyond it
+    (two different Sundays must not read the same)."""
+    local, today = dt.astimezone(EASTERN), now.astimezone(EASTERN).date()
+    clock = f"{local.hour % 12 or 12}:{local.minute:02d}{'a' if local.hour < 12 else 'p'}"
+    if not with_day or local.date() == today:
+        return clock
+    if (local.date() - today).days < 7:
+        return f"{local:%a} {clock}"
+    return f"{local.month}/{local.day} {clock}"
+
+
+def start_text(start: Optional[datetime], trusted: bool, now: datetime) -> Text:
+    """Start time in ET; 'live' once it has begun. A '?' marks a time that came
+    from Kalshi's skewed occurrence_datetime rather than a real schedule."""
+    if start is None:
+        return Text("--", style=DIM)
+    if start <= now:
+        return Text("live", style=YELLOW)
+    return Text(fmt_clock(start, now) + ("" if trusted else "?"),
+                style=WHITE if trusted else MUTED)
+
+
+def bet_text(kind: str, when: Optional[datetime], now: datetime) -> Text:
+    if kind == "placed" and when is not None:
+        return Text("✓ " + fmt_clock(when, now, with_day=False), style=GREEN)
+    if kind == "now":
+        return Text("next scan", style=YELLOW)
+    if kind == "eta" and when is not None:
+        return Text("~" + fmt_clock(when, now, with_day=False), style=CYAN)
+    return Text("--", style=DIM)
+
+
+def sport_header(sport: str, n: int) -> Text:
+    t = Text(sport, style="bold " + YELLOW)
+    t.append(f"  {n} rec{'s' if n != 1 else ''}", style=MUTED)
+    return t
 
 
 def record_text(record: tuple[int, int, float]) -> Text:
@@ -516,7 +696,7 @@ from textual.widgets import DataTable, Footer, Header, Static    # noqa: E402
 # measured from the data at render time. Kept tight so the whole table fits a
 # normal window without horizontal scrolling.
 SIGNAL_TAIL = [
-    ("PX", 4), ("FAIR", 4), ("CONF", 4), ("EDGE", 7), ("STAKE / CT", 14),
+    ("START", 12), ("BET", 8), ("PX", 4), ("FAIR", 4), ("CONF", 4), ("EDGE", 7), ("STAKE / CT", 14),
     ("FLOW", 10), ("BOOK  TRD    OI", 17), ("MODEL / CAL", 17),
 ]
 PENDING_TAIL = [
@@ -562,6 +742,10 @@ class DashboardApp(App):
         self._loop_info = LoopInfo()
         self._account_busy = False
         self._last_mtime: float = -1.0
+        # NFL/NHL real start times, by ticker. Filled off the UI thread; until a
+        # ticker resolves, rec_start falls back to the market's own time.
+        self._starts: dict[str, datetime] = {}
+        self._starts_busy = False
 
     # -- layout ------------------------------------------------------------
     def compose(self) -> ComposeResult:
@@ -628,6 +812,7 @@ class DashboardApp(App):
         self._scan = scan
         self.render_signals()
         self.render_kpis()
+        self.refresh_starts()
         if not force:
             # A new cycle is the only thing that can have changed the account
             # state (a bet may have been placed, and every pending bet needs
@@ -653,6 +838,33 @@ class DashboardApp(App):
         self._account_busy = False
         self.render_kpis()
         self.render_pending()
+        self.render_signals()      # the BET column reads the ledgers too
+
+    def refresh_starts(self) -> None:
+        """Look up real start times for any NFL/NHL ticker not already known."""
+        if self._starts_busy or self._scan is None:
+            return
+        todo = [r.get("ticker") or "" for r in self._scan.recs
+                if (r.get("ticker") or "") not in self._starts]
+        if not any(sport_of(t) in ("nfl", "nhl") for t in todo):
+            return
+        self._starts_busy = True
+        self.run_worker(lambda: self._starts_worker(todo), thread=True, exit_on_error=False)
+
+    def _starts_worker(self, tickers: list[str]) -> None:
+        try:
+            found = resolve_schedule_starts(tickers)
+        except Exception:
+            found = {}
+        self.call_from_thread(self._apply_starts, found)
+
+    def _apply_starts(self, found: dict[str, datetime]) -> None:
+        self._starts_busy = False
+        before = len(self._starts)
+        self._starts.update(found)
+        if len(self._starts) != before:
+            self.render_signals()
+            self.render_kpis()
 
     def refresh_loop_info(self) -> None:
         self.run_worker(self._loop_worker, thread=True, exit_on_error=False)
@@ -722,6 +934,10 @@ class DashboardApp(App):
 
         if self._scan:
             cov = Text(f"{len(self._scan.recs)} recs", style="bold " + WHITE)
+            groups = group_recs(self._scan.recs, self._starts)
+            if groups:
+                cov.append("\n" + " · ".join(f"{s} {len(rows)}" for s, rows in groups),
+                           style=MUTED)
             cov.append(f"\n{self._scan.scanned} scanned\n{self._scan.deep_scanned} deep",
                        style=DIM)
         else:
@@ -729,44 +945,59 @@ class DashboardApp(App):
         self._set("kpi_coverage", cov)
 
     def render_signals(self) -> None:
+        """Signals grouped into one section per sport, soonest game first."""
         table = self.query_one("#signals", DataTable)
         recs = self._scan.recs if self._scan else []
+        groups = group_recs(recs, self._starts)
         width = name_column_width([r.get("headline") or r.get("title") or "" for r in recs],
                                   [r.get("ticker") or "" for r in recs])
         self._sync_columns(table, [("#", 3), ("MATCHUP / TICKER", width)] + SIGNAL_TAIL)
         table.clear()
-        for i, r in enumerate(recs, 1):
-            book, trades, oi = flow_components(r)
-            cal = calibration_mult(r)
-            fair = r.get("fair_prob")
+        now = datetime.now(timezone.utc)
+        next_scan = self._next_scan_at()
+        for sport, rows in groups:
+            table.add_row(Text(""), sport_header(sport, len(rows)),
+                          *[Text("") for _ in SIGNAL_TAIL], height=1)
+            for i, (r, start, trusted) in enumerate(rows, 1):
+                table.add_row(Text(str(i), style=DIM),
+                              *self._signal_cells(r, start, trusted, now, next_scan),
+                              height=2)
 
-            model = Text(short_source(r.get("fair_source")), style=WHITE)
-            if cal is not None:
-                model.append(f" {cal:.2f}x", style=GREEN if cal >= 1 else RED)
+    def _signal_cells(self, r: dict, start: Optional[datetime], trusted: bool,
+                      now: datetime, next_scan: Optional[datetime]) -> list[Text]:
+        book, trades, oi = flow_components(r)
+        cal = calibration_mult(r)
+        fair = r.get("fair_prob")
 
-            headline = r.get("headline") or r.get("title") or r.get("ticker") or ""
-            name = name_cell(headline, r.get("ticker", ""))
-            # A conflict is the loop's own warning that money flow disagrees with
-            # fair value; the console marks it, so keep it visible here too.
-            if r.get("conflict"):
-                name.stylize("bold #d2a8ff", 0, len(headline))
+        model = Text(short_source(r.get("fair_source")), style=WHITE)
+        if cal is not None:
+            model.append(f" {cal:.2f}x", style=GREEN if cal >= 1 else RED)
 
-            table.add_row(
-                Text(str(i), style=DIM),
-                name,
-                Text(f"{float(r.get('entry_price') or 0):.2f}", style=WHITE),
-                Text(f"{fair:.0%}" if fair is not None else "--",
-                     style=WHITE if fair is not None else DIM),
-                Text(f"{float(r.get('confidence') or 0):.2f}", style=YELLOW),
-                signed(r.get("edge_cents"), "{:+.1f}c", zero_dim=False),
-                Text(f"${float(r.get('suggested_stake_usd') or 0):.2f} / "
-                     f"{float(r.get('suggested_contracts') or 0):.2f}ct", style=WHITE),
-                flow_text(r.get("flow_direction", "?"),
-                          float(r.get("money_flow_score") or 0.0)),
-                bto_text(book, trades, oi),
-                model,
-                height=2,
-            )
+        headline = r.get("headline") or r.get("title") or r.get("ticker") or ""
+        name = name_cell(headline, r.get("ticker", ""))
+        # A conflict is the loop's own warning that money flow disagrees with
+        # fair value; the console marks it, so keep it visible here too.
+        if r.get("conflict"):
+            name.stylize("bold #d2a8ff", 0, len(headline))
+
+        kind, when = bet_eta(r, start, now, next_scan, self._loop_info.interval,
+                             self._loop_info.mode, self._account.placed)
+        return [
+            name,
+            start_text(start, trusted, now),
+            bet_text(kind, when, now),
+            Text(f"{float(r.get('entry_price') or 0):.2f}", style=WHITE),
+            Text(f"{fair:.0%}" if fair is not None else "--",
+                 style=WHITE if fair is not None else DIM),
+            Text(f"{float(r.get('confidence') or 0):.2f}", style=YELLOW),
+            signed(r.get("edge_cents"), "{:+.1f}c", zero_dim=False),
+            Text(f"${float(r.get('suggested_stake_usd') or 0):.2f} / "
+                 f"{float(r.get('suggested_contracts') or 0):.2f}ct", style=WHITE),
+            flow_text(r.get("flow_direction", "?"),
+                      float(r.get("money_flow_score") or 0.0)),
+            bto_text(book, trades, oi),
+            model,
+        ]
 
     def render_pending(self) -> None:
         table = self.query_one("#pending", DataTable)

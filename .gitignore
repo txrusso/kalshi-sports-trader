@@ -12,7 +12,12 @@ __pycache__/
 # generated data / outputs
 logs/
 snapshots/
-output/
+# NOT all of output/ -- reporter.py and dashboard.py are SOURCE that happens to
+# live there, and blanket-ignoring the directory left them untracked for the
+# whole life of the project (found 2026-09-23). Ignore the generated files only.
+output/*.json
+output/*.jsonl
+output/*.png
 
 # Fetched data caches. Regenerated on demand (nflverse games.csv, the NBA
 # per-season game logs, the NHL per-season game logs, the MLB Elo history

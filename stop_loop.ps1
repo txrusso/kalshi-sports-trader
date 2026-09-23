@@ -23,7 +23,17 @@ launcher orphaned. See CLAUDE.md for why the loop is always two processes.
 [CmdletBinding()]
 param(
     [string] $Log = 'logs\paper_loop.log',
-    [switch] $WhatIfOnly
+    [switch] $WhatIfOnly,
+
+    # Kill the supervisor too, so the loop stays down.
+    #
+    # Without this, running the script BEFORE the daily stop does not stop the
+    # loop at all -- it bounces it: the supervisor sees python exit before
+    # 23:00 and restarts it after its backoff (verified live, 11:39:09 kill ->
+    # 11:39:40 restart). That is exactly right for the 23:00 task and for
+    # picking up a code change, and exactly wrong if you actually want the loop
+    # down during the day.
+    [switch] $NoRestart
 )
 
 $ErrorActionPreference = 'Continue'
@@ -55,7 +65,8 @@ $launchers = @($all | Where-Object { $_.CommandLine -like '*\.venv\Scripts\pytho
 $targets = if ($launchers.Count -gt 0) { $launchers } else { $all }
 
 if ($WhatIfOnly) {
-    Write-Marker "would kill: $(($targets.ProcessId) -join ', ')"
+    $extra = if ($NoRestart) { ' + the supervisor' } else { '' }
+    Write-Marker "would kill: $(($targets.ProcessId) -join ', ')$extra"
     exit 0
 }
 
@@ -78,7 +89,22 @@ if ($left.Count -gt 0) {
 }
 
 if ($left.Count -eq 0) {
-    Write-Marker 'loop stopped'
+    if ($NoRestart) {
+        # Kill the supervisor, not the whole tree: the bat then runs its exit
+        # block (marker + log rotation) and wscript returns, so the scheduled
+        # task INSTANCE completes. Killing wscript instead would skip all of
+        # that, which is the `schtasks /End` mistake this whole design avoids.
+        # Python is already down, so there is no window for a restart.
+        $sup = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+            Where-Object { $_.CommandLine -like '*run_loop_supervisor*' })
+        foreach ($s in $sup) {
+            Write-Marker "killing supervisor pid $($s.ProcessId) (-NoRestart)"
+            taskkill /PID $s.ProcessId /T /F 2>$null | Out-Null
+        }
+        Write-Marker 'loop stopped and will NOT be restarted'
+    } else {
+        Write-Marker 'loop stopped (supervisor will restart it before the daily stop)'
+    }
     exit 0
 }
 

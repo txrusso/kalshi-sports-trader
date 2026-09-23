@@ -1,6 +1,6 @@
-# Kalshi Sports Trader
+# Stakey
 
-A trading agent for Kalshi's sports markets. It watches where money is moving in the order
+**Stakey** is a trading agent for Kalshi's sports markets. It watches where money is moving in the order
 book, checks that against its own fair-value model of the game, and when the two agree by
 enough it sizes a trade.
 

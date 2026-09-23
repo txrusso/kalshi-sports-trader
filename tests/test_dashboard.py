@@ -23,7 +23,8 @@ from output.live_dashboard import (  # noqa: E402
     fmt_duration, fmt_start_offset, load_scan, mark_pending, name_cell,
     name_column_width, pending_bets, record_card, record_text, short_source,
     sport_records, _mode_from_args, signed, truncate,
-    bet_eta, bet_side_prob, fmt_clock, game_key, group_recs, placed_events, rec_start,
+    bet_eta, bet_fee, bet_side_prob, book_label, settled_bets, settled_summary, fmt_clock,
+    game_key, group_recs, placed_events, rec_start,
 )
 from engine.account_summary import _grade          # noqa: E402
 from kalshi.normalize import position_size         # noqa: E402
@@ -550,6 +551,74 @@ class BetSideFair(unittest.TestCase):
                 continue
             self.assertAlmostEqual((p - float(r["entry_price"])) * 100,
                                    float(r["edge_cents"]), delta=0.02, msg=r["ticker"])
+
+
+
+class SettledTab(unittest.TestCase):
+    """The Settled tab: recent graded bets with profit, fee, net and ROI."""
+    NOW = datetime(2026, 9, 23, 16, 0, tzinfo=UTC)
+
+    def _bet(self, ticker, side="YES", price=0.40, contracts=2.0, days_ago=1.0, **extra):
+        start = self.NOW - timedelta(days=days_ago)
+        return {"ticker": ticker, "side": side, "entry_price": price, "contracts": contracts,
+                "wager_usd": round(price * contracts, 2), "first_pitch": start.isoformat(),
+                **extra}
+
+    def test_profit_matches_the_shared_grading_exactly(self):
+        bets = [self._bet("KXMLBGAME-A-X", "YES", 0.40, 2.0),
+                self._bet("KXMLBGAME-B-X", "NO", 0.70, 1.5),
+                self._bet("KXMLBTOTAL-C-8", "YES", 0.55, 3.0)]
+        outcomes = {"KXMLBGAME-A-X": True, "KXMLBGAME-B-X": True, "KXMLBTOTAL-C-8": False}
+        rows = settled_bets(bets, outcomes, now=self.NOW)
+        self.assertAlmostEqual(sum(r["_profit"] for r in rows), _grade(bets, outcomes)[2])
+        by = {r["ticker"]: r for r in rows}
+        self.assertTrue(by["KXMLBGAME-A-X"]["_won"])
+        self.assertAlmostEqual(by["KXMLBGAME-A-X"]["_profit"], 1.20)     # 2 x (1 - 0.40)
+        self.assertFalse(by["KXMLBGAME-B-X"]["_won"])                   # NO lost: YES won
+        self.assertAlmostEqual(by["KXMLBGAME-B-X"]["_profit"], -1.05)
+
+    def test_fee_net_and_roi(self):
+        # MLB winner series: multiplier 0.5 -> 0.5*0.07*2*0.4*0.6 = 0.0168
+        r = settled_bets([self._bet("KXMLBGAME-A-X")], {"KXMLBGAME-A-X": True}, now=self.NOW)[0]
+        self.assertAlmostEqual(r["_fee"], 0.0168)
+        self.assertAlmostEqual(r["_net"], 1.20 - 0.0168)
+        self.assertAlmostEqual(r["_roi"], (1.20 - 0.0168) / 0.80)
+
+    def test_recorded_fee_wins_over_the_model(self):
+        b = self._bet("KXMLBTOTAL-C-8", fees_usd=0.0, execution="maker")
+        self.assertEqual(bet_fee(b), 0.0)
+
+    def test_maker_fill_without_a_recorded_fee_uses_the_maker_rate(self):
+        # KXMLBTOTAL is a free-maker series.
+        self.assertEqual(bet_fee(self._bet("KXMLBTOTAL-C-8", execution="maker")), 0.0)
+        self.assertGreater(bet_fee(self._bet("KXMLBTOTAL-C-8")), 0.0)
+
+    def test_window_pending_and_order(self):
+        bets = [self._bet("KXMLBGAME-OLD-X", days_ago=8),
+                self._bet("KXMLBGAME-NEW-X", days_ago=0.5),
+                self._bet("KXMLBGAME-MID-X", days_ago=3),
+                self._bet("KXMLBGAME-OPEN-X", days_ago=0.1)]
+        outcomes = {"KXMLBGAME-OLD-X": True, "KXMLBGAME-NEW-X": False,
+                    "KXMLBGAME-MID-X": True}                  # OPEN has no outcome yet
+        rows = settled_bets(bets, outcomes, now=self.NOW)
+        self.assertEqual([r["ticker"] for r in rows], ["KXMLBGAME-NEW-X", "KXMLBGAME-MID-X"])
+
+    def test_summary(self):
+        bets = [self._bet("KXMLBGAME-A-X"), self._bet("KXMLBGAME-B-X")]
+        rows = settled_bets(bets, {"KXMLBGAME-A-X": True, "KXMLBGAME-B-X": False}, now=self.NOW)
+        w, l, gross, fees, net, roi = settled_summary(rows)
+        self.assertEqual((w, l), (1, 1))
+        self.assertAlmostEqual(gross, 1.20 - 0.80)
+        self.assertAlmostEqual(net, gross - fees)
+        self.assertAlmostEqual(roi, net / 1.60)
+        self.assertEqual(settled_summary([])[:2], (0, 0))
+        self.assertIsNone(settled_summary([])[5])
+
+    def test_paper_ledger_reads_as_manual_not_fake(self):
+        self.assertEqual(book_label("paper"), "manual")
+        self.assertEqual(book_label("live"), "live")
+
+
 
 
 if __name__ == "__main__":

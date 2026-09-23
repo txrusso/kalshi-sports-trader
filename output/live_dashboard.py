@@ -20,7 +20,7 @@ Run it in Windows Terminal (any width; the tables scroll horizontally):
 
     .venv\\Scripts\\python.exe -m output.live_dashboard     (or scripts\\run_dashboard.bat)
 
-Keys: q quit, r force refresh.
+Keys: q quit, r force refresh, p / s switch the Pending / Settled tabs.
 """
 from __future__ import annotations
 
@@ -104,6 +104,7 @@ class AccountData:
     overall_by_sport: list[tuple[str, tuple[int, int, float]]] = field(default_factory=list)
     open_positions: Optional[int] = None
     pending: list[dict] = field(default_factory=list)
+    settled: list[dict] = field(default_factory=list)
     unrealized: Optional[float] = None
     placed: dict[str, dict[str, datetime]] = field(default_factory=dict)
     error: str = ""
@@ -281,8 +282,7 @@ def load_account() -> AccountData:
     from backtest.evaluate import _game_date
     from data.games import resolve_outcomes
     from engine.account_summary import _grade
-    from engine.live import LiveLedger
-    from engine.paper import PaperLedger
+    from engine.real_bets import load_real_bets
     from kalshi.client import KalshiClient
     from kalshi.normalize import position_size
 
@@ -310,14 +310,17 @@ def load_account() -> AccountData:
         from data.nfl_data import NflDataClient
         from data.nhl_data import NhlDataClient
 
-        bets = PaperLedger().load() + LiveLedger().load()
-        for b in bets:
-            # Paper rows have no order_id; live rows always do (engine/live.py).
-            b["_src"] = "live" if b.get("order_id") else "paper"
+        # Both ledgers, each row tagged live/paper, live rows corrected to what
+        # actually filled (engine/real_bets.py) -- the same view `cli.py settle`
+        # grades, so the cards can't disagree with it. Never-filled orders are
+        # kept here only so Settled can list them as "no fill"; nothing that
+        # grades or marks sees them.
+        all_bets = load_real_bets(client, include_unfilled=True)
+        bets = [b for b in all_bets if not b.get("_nofill")]
 
         clients = {"mlb": MlbStatsClient(), "nfl": NflDataClient(),
                    "nba": NbaDataClient(), "nhl": NhlDataClient()}
-        outcomes = resolve_outcomes({b["ticker"] for b in bets}, clients)
+        outcomes = resolve_outcomes({b["ticker"] for b in all_bets}, clients)
         today = datetime.now(EASTERN).strftime("%Y-%m-%d")
         today_bets = [b for b in bets if _game_date(b["ticker"]) == today]
         data.today = _grade(today_bets, outcomes)
@@ -325,7 +328,10 @@ def load_account() -> AccountData:
         data.today_by_sport = sport_records(today_bets, outcomes, _grade)
         data.overall_by_sport = sport_records(bets, outcomes, _grade)
         data.pending = pending_bets(bets, outcomes)
-        data.placed = placed_events(bets)
+        # The loop skips any event already in its ledger, filled or not, so the
+        # BET column must see the unfilled rows too.
+        data.placed = placed_events(all_bets)
+        data.settled = settled_bets(all_bets, outcomes)
     except Exception as e:
         errs.append(f"ledger: {e}")
 
@@ -401,6 +407,77 @@ def pending_bets(bets: list[dict], outcomes: dict[str, bool]) -> list[dict]:
         out.append({**b, "_start": start})
     out.sort(key=lambda b: b["_start"], reverse=True)
     return out
+
+
+SETTLED_DAYS = 7
+
+
+def bet_fee(bet: dict) -> float:
+    """Kalshi's fee on this bet, in dollars.
+
+    The fee the live ledger recorded when there is one (maker fills write the
+    real `fees_usd`); otherwise config/fees.py's model -- the same formula
+    `cli.py fees` audits against every real fill. Offline: the per-series
+    multiplier comes from its measured fallback table, not a live GET.
+    """
+    if bet.get("fees_usd") is not None:
+        return float(bet["fees_usd"])
+    from config.fees import fee_for
+    return fee_for(float(bet.get("contracts") or 0), float(bet.get("entry_price") or 0),
+                   bet.get("ticker") or "", is_taker=bet.get("execution") != "maker")
+
+
+def settled_bets(bets: list[dict], outcomes: dict[str, bool],
+                 days: int = SETTLED_DAYS, now: Optional[datetime] = None) -> list[dict]:
+    """Bets graded in the last `days`, newest game first, each with its result.
+
+    Profit is computed exactly as engine/account_summary._grade does (so the
+    rows sum to the same gross number the record cards show); the fee and net
+    are layered on top rather than changing that shared definition.
+    """
+    now = now or datetime.now(timezone.utc)
+    out = []
+    for b in bets:
+        yes_won = outcomes.get(b.get("ticker"))
+        if yes_won is None:
+            continue
+        start = parse_utc(b.get("first_pitch"))
+        if start is None or start < now - timedelta(days=days):
+            continue
+        won = yes_won if b.get("side") == "YES" else not yes_won
+        price = float(b.get("entry_price") or 0)
+        contracts = float(b.get("contracts") or 0)
+        wager = float(b.get("wager_usd") or price * contracts)
+        profit = ((1 - price) if won else -price) * contracts
+        fee = bet_fee(b)
+        row = {**b, "_start": start, "_won": won, "_profit": profit, "_fee": fee,
+               "_net": profit - fee, "_wager": wager,
+               "_roi": (profit - fee) / wager if wager else None}
+        if b.get("_nofill"):
+            # A canceled order that never filled: listed, but no money moved.
+            row.update(_profit=0.0, _fee=0.0, _net=0.0, _wager=0.0, _roi=None)
+        out.append(row)
+    out.sort(key=lambda b: b["_start"], reverse=True)
+    return out
+
+
+def settled_summary(rows: list[dict]) -> tuple[int, int, float, float, float, Optional[float]]:
+    """(wins, losses, gross, fees, net, net ROI) over settled rows that actually
+    filled -- a never-filled order is neither a win nor a loss."""
+    real = [r for r in rows if not r.get("_nofill")]
+    wins = sum(1 for r in real if r["_won"])
+    gross = sum(r["_profit"] for r in real)
+    fees = sum(r["_fee"] for r in real)
+    staked = sum(r["_wager"] for r in real)
+    return (wins, len(real) - wins, gross, fees, gross - fees,
+            (gross - fees) / staked if staked else None)
+
+
+def book_label(src: str) -> str:
+    """Ledger name for display. The paper ledger is NOT paper money: those
+    bets (Aug 6 - Sep 16) were real orders placed by hand from the alert. Only
+    the placer differs, so it reads 'manual' rather than implying they were fake."""
+    return "manual" if src == "paper" else (src or "")
 
 
 def parse_utc(value: Any) -> Optional[datetime]:
@@ -704,7 +781,8 @@ def name_column_width(names: list[str], tickers: list[str],
 
 from textual.app import App, ComposeResult                       # noqa: E402
 from textual.containers import Horizontal, Vertical              # noqa: E402
-from textual.widgets import DataTable, Footer, Header, Static    # noqa: E402
+from textual.widgets import (DataTable, Footer, Header, Static,  # noqa: E402
+                             TabbedContent, TabPane)
 
 # (label, width) for every column except the name column, whose width is
 # measured from the data at render time. Kept tight so the whole table fits a
@@ -715,7 +793,15 @@ SIGNAL_TAIL = [
 ]
 PENDING_TAIL = [
     ("SIDE", 4), ("PX", 4), ("CT", 5), ("WAGER", 6), ("MARK", 4),
-    ("UNREAL", 7), ("EDGE", 7), ("CONF", 4), ("BOOK", 5), ("ORDER", 8),
+    ("UNREAL", 7), ("EDGE", 7), ("CONF", 4), ("BOOK", 6), ("ORDER", 8),
+]
+# Settled swaps the live mark for the realized result. PROFIT is gross (it sums
+# to the record cards), FEE is Kalshi's fee, NET = PROFIT - FEE, and ROI is NET
+# over the dollars wagered.
+SETTLED_TAIL = [
+    ("SIDE", 4), ("PX", 4), ("CT", 5), ("WAGER", 6), ("W/L", 4),
+    ("PROFIT", 7), ("FEE", 6), ("NET", 7), ("ROI", 6),
+    ("EDGE", 7), ("CONF", 4), ("BOOK", 6), ("ORDER", 8),
 ]
 
 
@@ -740,12 +826,16 @@ class DashboardApp(App):
         border: round $primary; padding: 0 1;
     }
     #tables { height: 1fr; }
-    #pending_box { height: 1fr; min-height: 10; padding: 0 1; }
+    #pending_box { height: 1fr; min-height: 12; padding: 0 1; }
+    #bets_tabs, #bets_tabs TabPane { height: 1fr; }
+    #bets_tabs TabPane { padding: 0; }
     #signals_box { height: 2fr; padding: 0 1; }
     DataTable { height: 1fr; border: round $primary; }
     #status { height: 1; padding: 0 2; }
     """
-    BINDINGS = [("q", "quit", "Quit"), ("r", "force_refresh", "Refresh now")]
+    BINDINGS = [("q", "quit", "Quit"), ("r", "force_refresh", "Refresh now"),
+                ("p", "show_tab('tab_pending')", "Pending"),
+                ("s", "show_tab('tab_settled')", "Settled")]
 
     def __init__(self, latest: Path = LATEST, poll_seconds: float = 2.0) -> None:
         super().__init__()
@@ -775,7 +865,12 @@ class DashboardApp(App):
         with Vertical(id="tables"):
             # Pending first: money already at risk outranks money we might risk.
             with Vertical(id="pending_box"):
-                yield DataTable(id="pending", cursor_type="row", zebra_stripes=True)
+                # Tabs: money at risk now, and what recently came back.
+                with TabbedContent(id="bets_tabs", initial="tab_pending"):
+                    with TabPane("Pending", id="tab_pending"):
+                        yield DataTable(id="pending", cursor_type="row", zebra_stripes=True)
+                    with TabPane("Settled", id="tab_settled"):
+                        yield DataTable(id="settled", cursor_type="row", zebra_stripes=True)
             with Vertical(id="signals_box"):
                 yield DataTable(id="signals", cursor_type="row", zebra_stripes=True)
         yield Static("", id="status")
@@ -852,6 +947,7 @@ class DashboardApp(App):
         self._account_busy = False
         self.render_kpis()
         self.render_pending()
+        self.render_settled()
         self.render_signals()      # the BET column reads the ledgers too
 
     def refresh_starts(self) -> None:
@@ -1021,6 +1117,7 @@ class DashboardApp(App):
         self._sync_columns(table, [("WHEN", 10), ("BET / TICKER", width)] + PENDING_TAIL)
         table.clear()
 
+        self._set_tab_label("tab_pending", f"Pending ({len(pending)})")
         title = f"PENDING — {len(pending)} placed bet(s) awaiting settlement"
         if self._account.unrealized is not None:
             title += f"   unrealized {self._account.unrealized:+.2f}"
@@ -1042,8 +1139,80 @@ class DashboardApp(App):
                 else Text("--", style=DIM),
                 signed(b.get("edge_cents"), "{:+.1f}c", zero_dim=False),
                 Text(f"{float(b.get('confidence') or 0):.2f}", style=YELLOW),
-                Text(b.get("_src", ""), style=CYAN if b.get("_src") == "live" else DIM),
+                Text(book_label(b.get("_src", "")),
+                     style=CYAN if b.get("_src") == "live" else DIM),
                 Text(truncate(b.get("order_status") or "-", 8), style=DIM),
+                height=2,
+            )
+
+    def _set_tab_label(self, pane_id: str, label: str) -> None:
+        try:
+            self.query_one("#bets_tabs", TabbedContent).get_tab(pane_id).label = label
+        except Exception:
+            pass
+
+    def action_show_tab(self, pane_id: str) -> None:
+        self.query_one("#bets_tabs", TabbedContent).active = pane_id
+
+    def render_settled(self) -> None:
+        table = self.query_one("#settled", DataTable)
+        rows = self._account.settled
+        width = name_column_width([b.get("label") or "" for b in rows],
+                                  [b.get("ticker") or "" for b in rows])
+        self._sync_columns(table, [("WHEN", 10), ("BET / TICKER", width)] + SETTLED_TAIL)
+        table.clear()
+
+        wins, losses, gross, fees, net, roi = settled_summary(rows)
+        self._set_tab_label("tab_settled", f"Settled ({len(rows)})")
+        if rows:
+            title = (f"SETTLED — last {SETTLED_DAYS} days: {wins}-{losses} "
+                     f"({wins / max(1, wins + losses):.0%})   profit {gross:+.2f}   fees {fees:.2f}   "
+                     f"net {net:+.2f}")
+            if roi is not None:
+                title += f"   ROI {roi:+.1%}"
+            nofill = sum(1 for r in rows if r.get("_nofill"))
+            if nofill:
+                title += f"   ({nofill} never filled, excluded)"
+        else:
+            title = f"SETTLED — no bets settled in the last {SETTLED_DAYS} days"
+        table.border_title = title
+
+        now = datetime.now(timezone.utc)
+        for b in rows:
+            roi_b = b.get("_roi")
+            if b.get("_nofill"):
+                result = Text("--", style=DIM)
+            else:
+                result = Text("W", style=GREEN) if b["_won"] else Text("L", style=RED)
+            # CT is what actually filled; a partial fill reads e.g. "0.80/1.45".
+            ct = f"{float(b.get('contracts') or 0):.2f}"
+            if b.get("_nofill"):
+                ct = "0"
+            elif b.get("requested_contracts") is not None:
+                ct = f"{ct}/{float(b['requested_contracts']):.2f}"
+            status = b.get("_fill_status")
+            order = ("filled" if status == "executed" else status) or b.get("order_status") or "-"
+            if b.get("_nofill"):
+                order = "no fill"
+            table.add_row(
+                Text(fmt_clock(b["_start"], now), style=DIM),
+                name_cell(b.get("label") or "", b.get("ticker") or ""),
+                Text(b.get("side", ""), style=GREEN if b.get("side") == "YES" else RED),
+                Text(f"{float(b.get('entry_price') or 0):.2f}", style=WHITE),
+                Text(ct, style=DIM if b.get("_nofill") else WHITE),
+                Text(f"${b['_wager']:.2f}", style=WHITE),
+                result,
+                *((Text("--", style=DIM),) * 4 if b.get("_nofill") else (
+                    signed(b["_profit"], "{:+.2f}", zero_dim=False),
+                    Text(f"{b['_fee']:.2f}", style=MUTED),
+                    signed(b["_net"], "{:+.2f}", zero_dim=False),
+                    signed(roi_b * 100 if roi_b is not None else None, "{:+.0f}%",
+                           zero_dim=False))),
+                signed(b.get("edge_cents"), "{:+.1f}c", zero_dim=False),
+                Text(f"{float(b.get('confidence') or 0):.2f}", style=YELLOW),
+                Text(book_label(b.get("_src", "")),
+                     style=CYAN if b.get("_src") == "live" else DIM),
+                Text(truncate(order, 8), style=YELLOW if b.get("_nofill") else DIM),
                 height=2,
             )
 
@@ -1095,6 +1264,14 @@ def _selftest() -> int:
         print(f"  pending {b.get('label')!r} {b.get('side')} @{b.get('entry_price')} "
               f"x{b.get('contracts')} src={b.get('_src')} "
               f"mark={b.get('_mark')} unrealized={b.get('_unrealized')}")
+    w, l, gross, fees, net, roi = settled_summary(acct.settled)
+    print(f"settled   : last {SETTLED_DAYS}d {w}-{l} gross={gross:+.2f} fees={fees:.2f} "
+          f"net={net:+.2f} roi={roi if roi is None else round(roi, 4)}")
+    for b in acct.settled[:5]:
+        print(f"  {'W' if b['_won'] else 'L'} {b.get('label')!r} {b.get('side')} "
+              f"@{b.get('entry_price')} x{b.get('contracts')} profit={b['_profit']:+.2f} "
+              f"fee={b['_fee']:.4f} net={b['_net']:+.2f} roi={b['_roi']} "
+              f"book={book_label(b.get('_src', ''))}")
     if acct.error:
         print(f"  errors: {acct.error}")
     return 0

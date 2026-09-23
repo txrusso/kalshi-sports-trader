@@ -145,6 +145,47 @@ python -m backtest.nfl_model_backtest
 data without hitting the network. That's how every constant in `config/settings.py` got
 where it is, and most of those comments explain which sweep put it there.
 
+## The live dashboard
+
+```
+.venv\Scripts\python run_dashboard.py      # or run_dashboard.bat
+```
+
+A terminal dashboard ([Textual](https://textual.textualize.io/)) that shows what the loop
+is doing while it runs. It's **read-only and a separate process**: it never places, cancels
+or changes an order. It just watches the files the loop already writes
+(`output/recommendations_latest.json` and the two ledgers) and makes a few read-only API
+calls for balance and positions. The loop pipes its output into a log file, and a TUI can't
+render into a pipe, so keeping the viewer separate also keeps any rendering code out of the
+process that moves money.
+
+- **The top strip:** balance, today's and all-time record (split by sport, since each sport's
+  model is validated on its own), the mode the loop is actually running in (read from its
+  own command line), last scan, and a countdown to the next one.
+- **PENDING:** bets already placed and waiting to settle, marked to what the position could
+  be sold for right now (the bid on the side held, not the mid), with unrealized P&L.
+- **SIGNALS:** this cycle's recommendations, one section per sport, with the sport whose
+  next game is soonest on top and the soonest games first inside each section. Bets on the
+  same game stay together.
+
+What the SIGNALS columns mean:
+
+| Column | Meaning |
+|---|---|
+| **START** | First pitch or kickoff in ET. It comes from the same source the loop times its bets against (the MLB ticker, or the NFL/NHL schedule), because Kalshi's own event time runs about three hours late on NFL |
+| **BET** | Roughly when the loop will place the bet: the first scan inside the pregame window, about 15–25 minutes out. `✓` means it's already placed, `--` means it won't fire. It's an estimate, since the bet still has to clear every check on that scan |
+| **PX** | Cost of one contract on the side being bet (it pays $1 if it wins) |
+| **FAIR** | The model's probability that *this bet* wins. On an Under, that's the chance of the under, so FAIR − PX is always the edge |
+| **CONF** | A 0–1 confidence score combining money-flow strength, edge size, liquidity, and whether flow and model agree. It sets which signals show up and in what order, not the bet size |
+| **EDGE** | FAIR minus PX, in cents per contract |
+| **STAKE / CT** | Fractional-Kelly stake against the live balance, and the (fractional) contracts it buys |
+| **FLOW** | Which side the money is on, with the blended score from −1 to +1 |
+| **BOOK / TRD / OI** | The three money-flow components: order-book imbalance, aggressive trade flow, open-interest momentum |
+| **MODEL / CAL** | Which fair-value model produced FAIR, and the calibration multiplier: below 1.0× means similar past bets won less often than predicted, so confidence gets scaled down |
+
+`r` forces a refresh, `q` quits, and `--selftest` prints every data source as plain text
+without starting the UI. That's the quick check when something on screen looks wrong.
+
 ## Layout
 
 ```
@@ -155,6 +196,7 @@ signals/    money flow, Elo, calibration, recommendation assembly
 engine/     scanner, scan loop, snapshots, paper ledger, notifications
 backtest/   the validation suite
 output/     console reporting and the PNG dashboard
+run_dashboard.py   the live terminal dashboard (read-only viewer)
 ```
 
 Kalshi's API uses a fixed-point schema (`*_dollars` as strings, `*_fp` for sizes) that is

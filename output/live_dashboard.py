@@ -20,7 +20,7 @@ Run it in Windows Terminal (any width; the tables scroll horizontally):
 
     .venv\\Scripts\\python.exe -m output.live_dashboard     (or scripts\\run_dashboard.bat)
 
-Keys: q quit, r force refresh, p / s switch the Pending / Settled tabs.
+Keys: q quit, r force refresh, p / s / g switch the Pending / Settled / Graph tabs.
 """
 from __future__ import annotations
 
@@ -97,7 +97,9 @@ class LoopInfo:
 @dataclass
 class AccountData:
     """Everything that only changes when a bet settles or a scan completes."""
-    balance: Optional[float] = None
+    balance: Optional[float] = None       # total: cash + current value of positions
+    cash: Optional[float] = None
+    exposed: Optional[float] = None       # what the open positions cost
     today: tuple[int, int, float] = (0, 0, 0.0)
     overall: tuple[int, int, float] = (0, 0, 0.0)
     today_by_sport: list[tuple[str, tuple[int, int, float]]] = field(default_factory=list)
@@ -105,6 +107,7 @@ class AccountData:
     open_positions: Optional[int] = None
     pending: list[dict] = field(default_factory=list)
     settled: list[dict] = field(default_factory=list)
+    curves: dict[str, list[tuple[datetime, float]]] = field(default_factory=dict)
     unrealized: Optional[float] = None
     placed: dict[str, dict[str, datetime]] = field(default_factory=dict)
     error: str = ""
@@ -267,6 +270,35 @@ def sport_records(bets: list[dict], outcomes: dict[str, bool],
     return out
 
 
+def account_money(bal: dict, positions: Optional[list[dict]], position_size
+                  ) -> tuple[Optional[float], Optional[float], Optional[float]]:
+    """(total balance, cash, exposed) in dollars from Kalshi's own numbers.
+
+    - cash: `balance` (cents) -- what is free to bet.
+    - exposed: the summed `market_exposure_dollars` of open positions, i.e.
+      what they COST. None when positions could not be fetched, rather than a
+      misleading $0.00.
+    - total: cash + `portfolio_value` (cents), Kalshi's current value of those
+      positions -- the same total its own app shows. Falls back to cash +
+      exposed (cost basis) if portfolio_value is missing.
+    The gap between exposed and total - cash is the open positions' unrealized
+    P&L at Kalshi's mark.
+    """
+    cents = bal.get("balance")
+    cash = (float(cents) / 100.0 if cents is not None
+            else float(bal.get("balance_dollars") or 0))
+    exposed = None
+    if positions is not None:
+        exposed = sum(float(p.get("market_exposure_dollars") or 0)
+                      for p in positions if position_size(p) != 0)
+    pv = bal.get("portfolio_value")
+    if pv is not None:
+        total = cash + float(pv) / 100.0
+    else:
+        total = cash + (exposed or 0.0)
+    return total, cash, exposed
+
+
 def load_account() -> AccountData:
     """Balance, graded record (total and per sport), open positions, and the
     still-pending bets marked to the current market.
@@ -287,22 +319,26 @@ def load_account() -> AccountData:
     from kalshi.normalize import position_size
 
     client = None
+    bal: Optional[dict] = None
     try:
         client = KalshiClient(DEFAULTS)
         bal = client.balance()
-        cents = bal.get("balance")
-        data.balance = (float(cents) / 100.0 if cents is not None
-                        else float(bal.get("balance_dollars") or 0))
     except Exception as e:
         errs.append(f"balance: {e}")
 
     positions: list[dict] = []
+    positions_ok = False
     if client is not None:
         try:
             positions = (client.get_positions() or {}).get("market_positions") or []
             data.open_positions = sum(1 for p in positions if position_size(p) != 0)
+            positions_ok = True
         except Exception as e:
             errs.append(f"positions: {e}")
+
+    if bal is not None:
+        data.balance, data.cash, data.exposed = account_money(
+            bal, positions if positions_ok else None, position_size)
 
     try:
         from data.mlb_stats import MlbStatsClient
@@ -332,6 +368,7 @@ def load_account() -> AccountData:
         # BET column must see the unfilled rows too.
         data.placed = placed_events(all_bets)
         data.settled = settled_bets(all_bets, outcomes)
+        data.curves = profit_curves(bets, outcomes)
     except Exception as e:
         errs.append(f"ledger: {e}")
 
@@ -471,6 +508,36 @@ def settled_summary(rows: list[dict]) -> tuple[int, int, float, float, float, Op
     staked = sum(r["_wager"] for r in real)
     return (wins, len(real) - wins, gross, fees, gross - fees,
             (gross - fees) / staked if staked else None)
+
+
+def profit_curves(bets: list[dict], outcomes: dict[str, bool]
+                  ) -> dict[str, list[tuple[datetime, float]]]:
+    """Cumulative profit over time: "Overall" plus one curve per sport.
+
+    Each point is (game start, running total) after that bet settles, graded
+    exactly as engine/account_summary._grade does -- gross of fees -- so every
+    curve ends on the same number the record cards show. Bets are ordered by
+    game start, the only timestamp every ledger row carries.
+    """
+    graded = []
+    for b in bets:
+        yes_won = outcomes.get(b.get("ticker"))
+        start = parse_utc(b.get("first_pitch"))
+        if yes_won is None or start is None:
+            continue
+        won = yes_won if b.get("side") == "YES" else not yes_won
+        price = float(b.get("entry_price") or 0)
+        pnl = ((1 - price) if won else -price) * float(b.get("contracts") or 0)
+        graded.append((start, sport_of(b.get("ticker") or "").upper(), pnl))
+    graded.sort(key=lambda g: g[0])
+
+    curves: dict[str, list[tuple[datetime, float]]] = {"Overall": []}
+    totals: dict[str, float] = {"Overall": 0.0}
+    for start, sport, pnl in graded:
+        for name in ("Overall", sport):
+            totals[name] = totals.get(name, 0.0) + pnl
+            curves.setdefault(name, []).append((start, totals[name]))
+    return curves if graded else {}
 
 
 def book_label(src: str) -> str:
@@ -710,6 +777,23 @@ def sport_header(sport: str, n: int) -> Text:
     return t
 
 
+def money_card(balance: Optional[float], cash: Optional[float],
+               exposed: Optional[float]) -> Text:
+    """Balance / Cash / Exposed, labels aligned, each value or 'n/a'."""
+    if balance is None and cash is None:
+        return Text("unavailable", style=DIM)
+    t = Text()
+    for i, (label, value, style) in enumerate((
+            ("Balance", balance, GREEN), ("Cash", cash, "bold " + WHITE),
+            ("Exposed", exposed, YELLOW))):
+        if i:
+            t.append("\n")
+        t.append(f"{label + ':':<9}", style=MUTED)
+        t.append(f"${value:.2f}" if value is not None else "n/a",
+                 style=style if value is not None else DIM)
+    return t
+
+
 def record_text(record: tuple[int, int, float]) -> Text:
     wins, losses, net = record
     n = wins + losses
@@ -783,6 +867,7 @@ from textual.app import App, ComposeResult                       # noqa: E402
 from textual.containers import Horizontal, Vertical              # noqa: E402
 from textual.widgets import (DataTable, Footer, Header, Static,  # noqa: E402
                              TabbedContent, TabPane)
+from textual_plotext import PlotextPlot                           # noqa: E402
 
 # (label, width) for every column except the name column, whose width is
 # measured from the data at render time. Kept tight so the whole table fits a
@@ -798,6 +883,17 @@ PENDING_TAIL = [
 # Settled swaps the live mark for the realized result. PROFIT is gross (it sums
 # to the record cards), FEE is Kalshi's fee, NET = PROFIT - FEE, and ROI is NET
 # over the dollars wagered.
+# Line colours for the Graph tab. Deliberately NOT green/red: on this dashboard
+# those mean the sign of a number, and a sport's line can be on either side of
+# zero. Overall is the brightest so it reads as the headline.
+CURVE_COLORS = {
+    "Overall": (230, 237, 243),
+    "MLB": (88, 166, 255),
+    "NFL": (227, 179, 65),
+    "NBA": (210, 168, 255),
+    "NHL": (57, 197, 207),
+}
+
 SETTLED_TAIL = [
     ("SIDE", 4), ("PX", 4), ("CT", 5), ("WAGER", 6), ("W/L", 4),
     ("PROFIT", 7), ("FEE", 6), ("NET", 7), ("ROI", 6),
@@ -829,13 +925,14 @@ class DashboardApp(App):
     #pending_box { height: 1fr; min-height: 12; padding: 0 1; }
     #bets_tabs, #bets_tabs TabPane { height: 1fr; }
     #bets_tabs TabPane { padding: 0; }
-    #signals_box { height: 2fr; padding: 0 1; }
+    #signals_box { height: 1fr; padding: 0 1; }
     DataTable { height: 1fr; border: round $primary; }
     #status { height: 1; padding: 0 2; }
     """
     BINDINGS = [("q", "quit", "Quit"), ("r", "force_refresh", "Refresh now"),
                 ("p", "show_tab('tab_pending')", "Pending"),
-                ("s", "show_tab('tab_settled')", "Settled")]
+                ("s", "show_tab('tab_settled')", "Settled"),
+                ("g", "show_tab('tab_graph')", "Graph")]
 
     def __init__(self, latest: Path = LATEST, poll_seconds: float = 2.0) -> None:
         super().__init__()
@@ -855,7 +952,7 @@ class DashboardApp(App):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         with Horizontal(id="kpis"):
-            yield KpiCard("BALANCE", "kpi_balance")
+            yield KpiCard("ACCOUNT", "kpi_balance")
             yield KpiCard("TODAY", "kpi_today")
             yield KpiCard("OVERALL", "kpi_overall")
             yield KpiCard("MODE", "kpi_mode")
@@ -871,6 +968,8 @@ class DashboardApp(App):
                         yield DataTable(id="pending", cursor_type="row", zebra_stripes=True)
                     with TabPane("Settled", id="tab_settled"):
                         yield DataTable(id="settled", cursor_type="row", zebra_stripes=True)
+                    with TabPane("Graph", id="tab_graph"):
+                        yield PlotextPlot(id="profit_graph")
             with Vertical(id="signals_box"):
                 yield DataTable(id="signals", cursor_type="row", zebra_stripes=True)
         yield Static("", id="status")
@@ -948,6 +1047,7 @@ class DashboardApp(App):
         self.render_kpis()
         self.render_pending()
         self.render_settled()
+        self.render_graph()
         self.render_signals()      # the BET column reads the ledgers too
 
     def refresh_starts(self) -> None:
@@ -1017,9 +1117,7 @@ class DashboardApp(App):
 
     def render_kpis(self) -> None:
         acct = self._account
-        self._set("kpi_balance",
-                  Text(f"${acct.balance:.2f}", style=GREEN) if acct.balance is not None
-                  else Text("unavailable", style=DIM))
+        self._set("kpi_balance", money_card(acct.balance, acct.cash, acct.exposed))
         self._set("kpi_today", record_card(acct.today, acct.today_by_sport))
         self._set("kpi_overall", record_card(acct.overall, acct.overall_by_sport))
 
@@ -1154,6 +1252,46 @@ class DashboardApp(App):
     def action_show_tab(self, pane_id: str) -> None:
         self.query_one("#bets_tabs", TabbedContent).active = pane_id
 
+    def render_graph(self) -> None:
+        """Cumulative profit: one line overall, one per sport, zero marked."""
+        widget = self.query_one("#profit_graph", PlotextPlot)
+        plt = widget.plt
+        plt.clear_data()
+        curves = self._account.curves
+        if not curves:
+            plt.title("Cumulative profit -- no settled bets yet")
+            widget.refresh()
+            return
+        origin = min(pts[0][0] for pts in curves.values())
+
+        def days(t: datetime) -> float:
+            return (t - origin).total_seconds() / 86400.0
+
+        # Overall last, so it draws on top of the sport lines.
+        for name in sorted(curves, key=lambda n: (n == "Overall", n)):
+            pts = curves[name]
+            xs = [days(t) for t, _ in pts]
+            ys = [v for _, v in pts]
+            plt.plot(xs, ys, label=f"{name} {ys[-1]:+.2f}",
+                     color=CURVE_COLORS.get(name, (139, 148, 158)),
+                     # "fhd" = Unicode sextants (2x3 per cell): a solid line, thinner
+                     # than "hd"'s quarter blocks, without braille's dotted look.
+                     # Needs a font with U+1FB00-1FB3B -- Windows Terminal's
+                     # default Cascadia Mono has all 60, and WT draws block glyphs
+                     # itself. On a font without them, fall back to "hd".
+                     marker="fhd")
+        span = max(days(pts[-1][0]) for pts in curves.values())
+        plt.hline(0.0, color=(139, 148, 158))
+
+        # Dates on the x axis rather than "days since": ~6 evenly spaced ticks.
+        n_ticks = 6
+        ticks = [span * i / (n_ticks - 1) for i in range(n_ticks)] if span > 0 else [0.0]
+        labels = [(origin + timedelta(days=t)).astimezone(EASTERN).strftime("%b %d")
+                  for t in ticks]
+        plt.xticks(ticks, labels)
+        plt.title("Cumulative profit ($, before fees -- matches the record cards)")
+        widget.refresh()
+
     def render_settled(self) -> None:
         table = self.query_one("#settled", DataTable)
         rows = self._account.settled
@@ -1255,7 +1393,7 @@ def _selftest() -> int:
     print(f"loop      : running={info.running} pid={info.pid} mode={info.mode!r} "
           f"interval={info.interval} via {info.source}")
     acct = load_account()
-    print(f"account   : balance={acct.balance} today={acct.today} "
+    print(f"account   : balance={acct.balance} cash={acct.cash} exposed={acct.exposed} today={acct.today} "
           f"overall={acct.overall} open_positions={acct.open_positions} "
           f"pending={len(acct.pending)} unrealized={acct.unrealized}")
     print(f"  today by sport   : {acct.today_by_sport}")

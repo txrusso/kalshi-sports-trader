@@ -24,7 +24,7 @@ from output.live_dashboard import (  # noqa: E402
     name_column_width, pending_bets, record_card, record_text, short_source,
     sport_records, _mode_from_args, signed, truncate,
     bet_eta, bet_fee, bet_side_prob, book_label, settled_bets, settled_summary, fmt_clock,
-    game_key, group_recs, placed_events, rec_start,
+    game_key, group_recs, placed_events, profit_curves, rec_start, account_money, money_card,
 )
 from engine.account_summary import _grade          # noqa: E402
 from kalshi.normalize import position_size         # noqa: E402
@@ -619,6 +619,78 @@ class SettledTab(unittest.TestCase):
         self.assertEqual(book_label("live"), "live")
 
 
+
+
+
+class ProfitCurves(unittest.TestCase):
+    """GRAPH tab: cumulative profit, overall and per sport."""
+    T0 = datetime(2026, 9, 1, 23, 0, tzinfo=UTC)
+
+    def _bet(self, ticker, hours, side="YES", price=0.40, contracts=2.0):
+        return {"ticker": ticker, "side": side, "entry_price": price, "contracts": contracts,
+                "first_pitch": (self.T0 + timedelta(hours=hours)).isoformat()}
+
+    def test_overall_and_each_sport_end_on_the_graded_totals(self):
+        bets = [self._bet("KXMLBGAME-A-X", 0), self._bet("KXNFLGAME-B-X", 5),
+                self._bet("KXMLBTOTAL-C-8", 10, side="NO", price=0.7, contracts=1.0),
+                self._bet("KXNFLTOTAL-D-40", 20)]
+        outcomes = {"KXMLBGAME-A-X": True, "KXNFLGAME-B-X": False,
+                    "KXMLBTOTAL-C-8": False, "KXNFLTOTAL-D-40": True}
+        curves = profit_curves(bets, outcomes)
+        self.assertEqual(set(curves), {"Overall", "MLB", "NFL"})
+        self.assertAlmostEqual(curves["Overall"][-1][1], _grade(bets, outcomes)[2])
+        self.assertAlmostEqual(curves["MLB"][-1][1], _grade(bets[0::2], outcomes)[2])
+        self.assertAlmostEqual(curves["NFL"][-1][1], _grade(bets[1::2], outcomes)[2])
+
+    def test_points_are_in_time_order_and_running(self):
+        bets = [self._bet("KXMLBGAME-LATE-X", 10), self._bet("KXMLBGAME-EARLY-X", 0)]
+        curves = profit_curves(bets, {"KXMLBGAME-LATE-X": False, "KXMLBGAME-EARLY-X": True})
+        pts = curves["Overall"]
+        self.assertLess(pts[0][0], pts[1][0])
+        self.assertAlmostEqual(pts[0][1], 1.20)             # early win first
+        self.assertAlmostEqual(pts[1][1], 1.20 - 0.80)      # then the late loss
+
+    def test_unsettled_bets_are_not_plotted(self):
+        bets = [self._bet("KXMLBGAME-A-X", 0), self._bet("KXMLBGAME-OPEN-X", 1)]
+        curves = profit_curves(bets, {"KXMLBGAME-A-X": True})
+        self.assertEqual(len(curves["Overall"]), 1)
+
+    def test_nothing_settled_is_empty_not_a_crash(self):
+        self.assertEqual(profit_curves([self._bet("KXMLBGAME-A-X", 0)], {}), {})
+        self.assertEqual(profit_curves([], {}), {})
+
+
+
+class AccountMoney(unittest.TestCase):
+    """ACCOUNT card: Balance = cash + current value of positions; Exposed = cost."""
+    # Shape of a real /portfolio/balance response (2026-09-23, one open position).
+    BAL = {"balance": 2215, "balance_dollars": "22.1522", "portfolio_value": 72}
+    POS = [{"ticker": "KXMLBTOTAL-X-6", "position_fp": "1.92", "market_exposure_dollars": "1.382400"},
+           {"ticker": "KXMLBGAME-CLOSED-X", "position_fp": "0", "market_exposure_dollars": "0.5"}]
+
+    def test_real_shape(self):
+        total, cash, exposed = account_money(self.BAL, self.POS, position_size)
+        self.assertAlmostEqual(cash, 22.15)
+        self.assertAlmostEqual(exposed, 1.3824)          # closed position not counted
+        self.assertAlmostEqual(total, 22.15 + 0.72)      # Kalshi's own current value
+
+    def test_no_positions_means_total_equals_cash(self):
+        total, cash, exposed = account_money({"balance": 2354, "portfolio_value": 0}, [],
+                                             position_size)
+        self.assertEqual((total, cash, exposed), (23.54, 23.54, 0.0))
+
+    def test_positions_fetch_failed_is_unknown_not_zero(self):
+        self.assertIsNone(account_money(self.BAL, None, position_size)[2])
+
+    def test_missing_portfolio_value_falls_back_to_cost(self):
+        total, _, _ = account_money({"balance": 2215}, self.POS, position_size)
+        self.assertAlmostEqual(total, 22.15 + 1.3824)
+
+    def test_card_lines(self):
+        lines = money_card(22.87, 22.15, 1.38).plain.splitlines()
+        self.assertEqual(lines, ["Balance: $22.87", "Cash:    $22.15", "Exposed: $1.38"])
+        self.assertEqual(money_card(None, None, None).plain, "unavailable")
+        self.assertIn("Exposed: n/a", money_card(22.15, 22.15, None).plain)
 
 
 if __name__ == "__main__":

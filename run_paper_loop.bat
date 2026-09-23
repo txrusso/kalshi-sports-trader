@@ -33,11 +33,24 @@ rem restart doesn't stack windows), and wrapped in try/catch so a viewer
 rem that fails to open can never stop the loop from starting.
 powershell -NoProfile -Command "try { $up = Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*run_dashboard.py*' }; if (-not $up) { $here = (Get-Location).Path; $bat = Join-Path $here 'run_dashboard.bat'; if (Get-Command wt.exe -ErrorAction SilentlyContinue) { Start-Process wt.exe -ArgumentList '-d', $here, 'cmd', '/k', $bat } else { Start-Process cmd.exe -ArgumentList '/k', $bat -WorkingDirectory $here } } } catch { }"
 
-rem NOT `Tee-Object -FilePath`: in Windows PowerShell 5.1 that writes UTF-16LE,
-rem so the log became unreadable to grep, tail, and every other text tool.
-rem ForEach-Object keeps the console echo (useful when this is run by hand)
-rem while pinning the file to UTF-8, matching what cmd's own `>>` above writes.
-powershell -NoProfile -Command "& '.venv\Scripts\python.exe' -u cli.py loop --interval 600 --live --in-game 2>&1 | ForEach-Object { Write-Host $_; Add-Content -Path 'logs\paper_loop.log' -Value $_ -Encoding UTF8 }"
+rem The loop runs under a supervisor (run_loop_supervisor.ps1) rather than being
+rem launched directly. Two reasons, both learned the hard way on 2026-09-23:
+rem   1. AUTO-RESTART. If python dies -- crash, OOM, stray kill -- the supervisor
+rem      brings it straight back, instead of the machine sitting there all day
+rem      with no loop and nothing saying so.
+rem   2. THE DAILY STOP ACTUALLY HAPPENS. Task Scheduler cannot stop this loop:
+rem      its ExecutionTimeLimit and `schtasks /End` terminate the task's OWN
+rem      process, not the descendant python tree (observed twice -- /End reported
+rem      SUCCESS while both python PIDs kept scanning). So the 15h limit ended the
+rem      task instance while the loop ran on forever, and the next morning's 10:00
+rem      run started a SECOND live loop on top of the survivor. The KalshiLoopStop
+rem      task now kills python at 23:00 and the supervisor declines to restart it
+rem      past that, so this bat reaches its exit block and the task instance
+rem      finally completes -- which is what makes tomorrow start clean.
+rem The supervisor owns the logging pipeline that used to live on this line (NOT
+rem `Tee-Object -FilePath`: in Windows PowerShell 5.1 that writes UTF-16LE and
+rem makes the log unreadable to grep, tail and every other text tool).
+powershell -NoProfile -ExecutionPolicy Bypass -File run_loop_supervisor.ps1
 
 rem ---------------------------------------------------------------------------
 rem The loop has exited, so NOTHING holds logs\paper_loop.log any more -- this is

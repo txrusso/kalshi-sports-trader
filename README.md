@@ -75,9 +75,9 @@ whole 505-bet window it's +10.4% on a 51.9% win rate, with a 32.6% peak-to-troug
 
 The forward test is every bet actually placed: the paper-ledger era, where the agent
 recommended and I placed the order, and since September 17 the live ledger, where it
-places them itself. As of September 23 that's **102-72 (59%), +$6.06 net** on about $20
-of deposited capital. MLB is 89-58 (+$7.71). NFL is 13-14 (−$1.65), three weeks into its
-first regular season. The early paper run looked better (39-20 as of September 3), so
+places them itself. As of September 23 that's **101-71 (59%), +$6.75 net** on about $20
+of deposited capital, counting only orders that actually filled. MLB is 88-57 (+$8.40).
+NFL is 13-14 (−$1.65), three weeks into its first regular season. The early paper run looked better (39-20 as of September 3), so
 the edge on real fills is thinner than it first appeared.
 
 Two honest caveats. One partial season is one partial season — 500 simulated bets with a

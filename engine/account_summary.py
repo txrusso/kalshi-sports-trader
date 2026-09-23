@@ -6,8 +6,9 @@ real money on the real Kalshi account. Paper-ledger bets were historically
 placed manually by the user off the loop's notifications (see CLAUDE.md's
 "Live operational setup" section); live-ledger bets are the ones `loop --live`
 auto-submits itself. Grading reuses the same settled-outcome logic `cli.py
-settle` uses (data.games.resolve_outcomes), so this can never disagree with
-what `settle` reports for the same bets.
+settle` uses (data.games.resolve_outcomes), and both load bets through
+engine.real_bets.load_real_bets -- which drops live orders that never filled --
+so this can never disagree with what `settle` reports for the same bets.
 
 Best-effort by design: a balance-fetch or outcome-resolution failure must
 never crash the loop's console output, so every failure degrades to
@@ -21,8 +22,7 @@ from datetime import datetime
 from backtest.evaluate import _game_date
 from config.settings import EASTERN
 from data.games import resolve_outcomes
-from engine.live import LiveLedger
-from engine.paper import PaperLedger
+from engine.real_bets import load_real_bets
 from kalshi.client import KalshiClient
 
 log = logging.getLogger("engine.account_summary")
@@ -61,7 +61,7 @@ def render(client: KalshiClient, clients: dict) -> str:
         bal_str = "unavailable"
 
     try:
-        bets = PaperLedger().load() + LiveLedger().load()
+        bets = load_real_bets(client)
         today = datetime.now(EASTERN).strftime("%Y-%m-%d")
         outcomes = resolve_outcomes({b["ticker"] for b in bets}, clients)
         today_bets = [b for b in bets if _game_date(b["ticker"]) == today]

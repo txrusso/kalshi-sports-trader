@@ -22,7 +22,6 @@ from matplotlib import font_manager
 from backtest.evaluate import graded_bets, load_rows
 from config.settings import DEFAULTS, EASTERN, OUTPUT_DIR, Settings
 from data.games import build_clients, resolve_outcomes
-from engine.paper import PaperLedger
 from kalshi.client import KalshiClient, KalshiError
 from kalshi.normalize import position_size
 
@@ -63,8 +62,10 @@ def _account_snapshot(settings: Settings):
 
 
 def _real_bets(clients: dict):
-    """Paper-ledger bets split into settled (with won/pnl) and pending."""
-    bets = PaperLedger().load()
+    """Real bets (both ledgers, never-filled orders dropped -- see
+    engine/real_bets.py) split into settled (with won/pnl) and pending."""
+    from engine.real_bets import load_real_bets
+    bets = load_real_bets()
     if not bets:
         return [], []
     outcomes = resolve_outcomes({b["ticker"] for b in bets}, clients)

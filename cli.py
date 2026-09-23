@@ -432,28 +432,30 @@ def cmd_loop(args) -> None:
 
 
 def cmd_settle(args) -> None:
-    from engine.paper import PaperLedger
+    # Both ledgers (all real money -- paper = placed by hand, live = placed by the
+    # loop), with live orders that never filled dropped. See engine/real_bets.py.
+    from engine.real_bets import load_real_bets
     from backtest.evaluate import _game_date
     from data.games import resolve_outcomes
     from config.sports import sport_of, market_kind
-    bets = PaperLedger().load()
+    bets = load_real_bets()
     if args.date:
         bets = [b for b in bets if _game_date(b["ticker"]) == args.date]
     if getattr(args, "sport", None):
         want = args.sport.lower()
         bets = [b for b in bets if sport_of(b["ticker"]) == want]
         if not bets:
-            print(f"No {want.upper()} bets in the paper ledger"
+            print(f"No {want.upper()} bets in the ledger"
                   f"{' for ' + args.date if args.date else ''}.")
             return
     if not bets:
-        print("Paper ledger is empty (run `loop --paper` to accumulate bets).")
+        print("No bets in either ledger yet.")
         return
     outcomes = resolve_outcomes({b["ticker"] for b in bets}, build_clients())
     settled = [b for b in bets if b["ticker"] in outcomes]
     pending = [b for b in bets if b["ticker"] not in outcomes]
 
-    print(f"\n=== PAPER LEDGER: {len(bets)} bets ({len(settled)} settled, {len(pending)} pending) ===")
+    print(f"\n=== LEDGER (live + manual): {len(bets)} bets ({len(settled)} settled, {len(pending)} pending) ===")
     if settled:
         print(f"{'RESULT':<7}{'BET':<34}{'ENTRY':>6}{'CT':>5}{'NET$':>9}  MARKET")
         print("-" * 82)

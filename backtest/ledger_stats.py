@@ -31,12 +31,14 @@ from typing import Callable, Optional
 
 from config.sports import market_kind, sport_of
 from data.games import build_clients, resolve_outcomes
-from engine.paper import PaperLedger
+from engine.real_bets import load_real_bets
 
 
 def _graded_rows(sport: Optional[str] = None) -> list[dict]:
-    """Settled ledger bets, each annotated with its realized result and economics."""
-    bets = PaperLedger().load()
+    """Settled ledger bets, each annotated with its realized result and economics.
+
+    Both ledgers, live orders that never filled dropped (engine/real_bets.py)."""
+    bets = load_real_bets()
     if sport:
         bets = [b for b in bets if sport_of(b["ticker"]) == sport.lower()]
     if not bets:

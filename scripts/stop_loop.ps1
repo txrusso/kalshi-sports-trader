@@ -40,8 +40,10 @@ $ErrorActionPreference = 'Continue'
 
 # The scheduled task runs this with no working directory, so relative paths
 # would resolve against whatever cwd it inherits. Anchor on the repo instead.
-Set-Location -LiteralPath $PSScriptRoot
-if (-not [IO.Path]::IsPathRooted($Log)) { $Log = Join-Path $PSScriptRoot $Log }
+# It lives in scripts/, so the repo root is its parent.
+$repo = Split-Path -Parent $PSScriptRoot
+Set-Location -LiteralPath $repo
+if (-not [IO.Path]::IsPathRooted($Log)) { $Log = Join-Path $repo $Log }
 
 function Write-Marker([string] $Message) {
     $line = "===== stop_loop $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') $Message ====="

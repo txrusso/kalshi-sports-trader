@@ -1,5 +1,5 @@
 @echo off
-cd /d "%~dp0"
+cd /d "%~dp0.."
 set PYTHONUNBUFFERED=1
 set PYTHONIOENCODING=utf-8
 
@@ -23,7 +23,7 @@ powershell -NoProfile -Command "$f='logs\paper_loop.log'; try { if ((Test-Path $
 
 echo ===== paper loop started %DATE% %TIME% =====>> logs\paper_loop.log
 
-rem Open the live dashboard (run_dashboard.py) in its own window. It is a
+rem Open the live dashboard (output/live_dashboard.py) in its own window. It is a
 rem READ-ONLY viewer in a SEPARATE process -- it cannot place an order and
 rem cannot affect this loop. It is launched separately rather than wrapped
 rem around the loop because the loop's stdout is piped into the log below,
@@ -31,7 +31,7 @@ rem and a TUI cannot render into a pipe.
 rem Guarded two ways: skipped if a dashboard is already up (so a loop
 rem restart doesn't stack windows), and wrapped in try/catch so a viewer
 rem that fails to open can never stop the loop from starting.
-powershell -NoProfile -Command "try { $up = Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*run_dashboard.py*' }; if (-not $up) { $here = (Get-Location).Path; $bat = Join-Path $here 'run_dashboard.bat'; if (Get-Command wt.exe -ErrorAction SilentlyContinue) { Start-Process wt.exe -ArgumentList '-d', $here, 'cmd', '/k', $bat } else { Start-Process cmd.exe -ArgumentList '/k', $bat -WorkingDirectory $here } } } catch { }"
+powershell -NoProfile -Command "try { $up = Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*live_dashboard*' }; if (-not $up) { $here = (Get-Location).Path; $bat = Join-Path $here 'scripts\run_dashboard.bat'; if (Get-Command wt.exe -ErrorAction SilentlyContinue) { Start-Process wt.exe -ArgumentList '-d', $here, 'cmd', '/k', $bat } else { Start-Process cmd.exe -ArgumentList '/k', $bat -WorkingDirectory $here } } } catch { }"
 
 rem The loop runs under a supervisor (run_loop_supervisor.ps1) rather than being
 rem launched directly. Two reasons, both learned the hard way on 2026-09-23:
@@ -50,7 +50,7 @@ rem      finally completes -- which is what makes tomorrow start clean.
 rem The supervisor owns the logging pipeline that used to live on this line (NOT
 rem `Tee-Object -FilePath`: in Windows PowerShell 5.1 that writes UTF-16LE and
 rem makes the log unreadable to grep, tail and every other text tool).
-powershell -NoProfile -ExecutionPolicy Bypass -File run_loop_supervisor.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_loop_supervisor.ps1
 
 rem ---------------------------------------------------------------------------
 rem The loop has exited, so NOTHING holds logs\paper_loop.log any more -- this is

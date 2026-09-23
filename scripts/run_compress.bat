@@ -10,6 +10,6 @@ rem
 rem 23:30 is after the 23:00 stop, but the timing barely matters: today's file
 rem is never compressed (the loop appends to it), so this only ever touches
 rem days that are already closed.
-cd /d "%~dp0"
+cd /d "%~dp0.."
 set PYTHONIOENCODING=utf-8
-.venv\Scripts\python.exe compress_snapshots.py >> logs\snapshot_compress.log 2>&1
+.venv\Scripts\python.exe scripts\compress_snapshots.py >> logs\snapshot_compress.log 2>&1

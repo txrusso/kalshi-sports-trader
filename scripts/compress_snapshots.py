@@ -32,9 +32,9 @@ an interrupted run leaves both copies rather than a truncated one (and
 `load_rows` prefers the plain file when both exist, so a day can never be
 double-counted).
 
-    python compress_snapshots.py --dry-run      # show what would happen
-    python compress_snapshots.py                # compress days older than 2
-    python compress_snapshots.py --keep-days 7  # keep a week uncompressed
+    python scripts/compress_snapshots.py --dry-run      # show what would happen
+    python scripts/compress_snapshots.py                # compress days older than 2
+    python scripts/compress_snapshots.py --keep-days 7  # keep a week uncompressed
 """
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ import sys
 from datetime import date, timedelta
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[1]   # lives in scripts/
 SNAPSHOTS = ROOT / "snapshots"
 LEVEL = 6          # 12x on this data; 9 buys ~2% more for several times the CPU
 

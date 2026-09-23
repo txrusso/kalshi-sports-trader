@@ -60,7 +60,8 @@ $ErrorActionPreference = 'Continue'
 # The bat already cds here, but the loop runs `cli.py` from the repo root and
 # resolves .venv relatively, so make that guarantee explicit rather than
 # inherited -- this script is only ever valid when run from the repo.
-Set-Location -LiteralPath $PSScriptRoot
+# It lives in scripts/, so the repo root is its parent.
+Set-Location -LiteralPath (Split-Path -Parent $PSScriptRoot)
 
 function Write-Marker([string] $Message) {
     # Markers go to the same log as the loop's own output so the restart story

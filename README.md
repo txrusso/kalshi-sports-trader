@@ -14,8 +14,10 @@ myself a receipt after each order lands, not a slip to act on. See `engine/live.
 reversal of the original design boundary below, made deliberately and not lightly, given
 how thin the edge here is.
 
-Covers MLB and NFL right now. Both run through the same pipeline in the same scan cycle;
-only the fair-value half is sport-specific.
+Covers four sports. MLB (winners and totals) and NFL (winners, totals and point spreads)
+trade live. NBA and NHL are built, and wait for their seasons to open before they can be
+checked against real markets. Every sport runs through the same pipeline in the same scan
+cycle; only the fair-value half is sport-specific.
 
 ![The pipeline, end to end](docs/images/pipeline.png)
 
@@ -23,7 +25,7 @@ only the fair-value half is sport-specific.
 
 Two independent things have to line up before a market is worth a bet.
 
-**Money flow** is the primary signal and it's the reason the project exists. Every 30
+**Money flow** is the primary signal and it's the reason the project exists. Every 10
 minutes it reads the order book, recent trades, and open interest for the most liquid
 games, and scores which side the money is actually leaning. Three components, weighted
 40/35/25: near-touch book imbalance, recency-weighted aggressive (taker) dollars, and
@@ -46,10 +48,19 @@ wrong enough to bother.
 |---|---|---|
 | **MLB** | log5 on season records + home field, blended 80/20 with an Elo rating built from every game back to 2023 | Expected runs from team offense × opponent run prevention, where prevention folds in the starter's RA9 regressed by innings, plus a park factor. Negative binomial → P(over) |
 | **NFL** | Elo only. 17 games a season is far too few for a stable in-season win%, so ratings carry over from the prior season with a third regressed to the mean | Same shape as MLB, but blended with last season's full rate weighted by games played so far |
+| **NBA** | Elo, with home-court advantage tuned down from the published value (it tested clearly worse on two real seasons) | Same shape, points instead of runs |
+| **NHL** | Elo, tuned from scratch on two real seasons, since there's no published NHL model to start from | Same shape, goals instead of runs |
+
+NFL point spreads model the final margin as a normal distribution centred on the same Elo
+gap the winner model uses, with the slope and spread fit on 7,000+ real games.
+
+Once a game is under way, MLB winner markets can still be bet: the probability comes from
+MLB's own live win-probability feed, and the edge has to clear a higher 8¢ bar.
 
 A recommendation needs the flow and the edge to agree, the edge to clear 5.5¢, the spread
-to be tradeable, and the confidence to clear its floor. Size is quarter-ish Kelly against
-the live account balance, floored to whole contracts.
+to be tradeable, and the confidence to clear its floor. Size is 0.20 Kelly against
+the live account balance, capped at 6% of it per bet, in fractional contracts (Kalshi
+allows 0.01), so the order spends the stake Kelly actually asked for.
 
 ## Does it work
 
@@ -62,10 +73,12 @@ prices. Constants were tuned on games through July 15 and validated on everythin
 which is the only half that means anything: **+12.2% ROI on 308 held-out bets**. Over the
 whole 505-bet window it's +10.4% on a 51.9% win rate, with a 32.6% peak-to-trough drawdown.
 
-The forward test is the paper ledger — bets the agent recommended near first pitch that I
-then actually placed. As of September 3, that's **39-20 (66%), +12% ROI, +$9.07** on a $50
-account. Totals are 22-8, winners 17-12. NFL has no settled record yet; the regular season
-starts September 4.
+The forward test is every bet actually placed: the paper-ledger era, where the agent
+recommended and I placed the order, and since September 17 the live ledger, where it
+places them itself. As of September 23 that's **102-72 (59%), +$6.06 net** on about $20
+of deposited capital. MLB is 89-58 (+$7.71). NFL is 13-14 (−$1.65), three weeks into its
+first regular season. The early paper run looked better (39-20 as of September 3), so
+the edge on real fills is thinner than it first appeared.
 
 Two honest caveats. One partial season is one partial season — 500 simulated bets with a
 per-bet standard deviation near 0.9 is encouraging, not conclusive. And the P&L chart was
@@ -148,7 +161,7 @@ where it is, and most of those comments explain which sweep put it there.
 ## The live dashboard
 
 ```
-.venv\Scripts\python run_dashboard.py      # or run_dashboard.bat
+.venv\Scripts\python -m output.live_dashboard      # or scripts\run_dashboard.bat
 ```
 
 A terminal dashboard ([Textual](https://textual.textualize.io/)) that shows what the loop
@@ -195,8 +208,9 @@ data/       per-sport game data and fair-value models
 signals/    money flow, Elo, calibration, recommendation assembly
 engine/     scanner, scan loop, snapshots, paper ledger, notifications
 backtest/   the validation suite
-output/     console reporting and the PNG dashboard
-run_dashboard.py   the live terminal dashboard (read-only viewer)
+output/     console reporting, the PNG dashboard, and the live terminal dashboard
+scripts/    Windows launchers: the supervised loop, the nightly stop, settle, and
+            snapshot compression (each is run by a scheduled task)
 ```
 
 Kalshi's API uses a fixed-point schema (`*_dollars` as strings, `*_fp` for sizes) that is
@@ -204,14 +218,10 @@ easy to get subtly wrong — everything goes through `kalshi/normalize.py` for t
 
 ## Where this is going
 
-**NBA and NHL are next.** Both fit the existing shape: money flow is entirely Kalshi-native
-and needed no changes at all when NFL was added, so the work is a data source and two
-fair-value models per sport. NBA should be the easier of the two — 82 games gives a stable
-in-season signal, possessions and pace make totals fairly tractable, and rest/back-to-backs
-are a real and well-documented effect the market doesn't always price. NHL is harder;
-scoring is low enough that game outcomes are noisy, and I expect goalie starts to matter to
-totals roughly the way starting pitchers do in baseball. Given what the pitcher experiment
-found, that's an argument for goalies on totals and against them on winners.
+**NBA and NHL go live when their seasons open.** Both models are built and validated
+against real past seasons. What they can't have yet is a check against real Kalshi prices,
+since no market has settled. Money flow needed no changes for either, which held up again
+here: it's entirely Kalshi-native.
 
 Other things on the list:
 

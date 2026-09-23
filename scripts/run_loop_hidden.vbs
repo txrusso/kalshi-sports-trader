@@ -2,7 +2,7 @@
 '
 ' The scheduled task KalshiPaperLoop points at this instead of at
 ' run_paper_loop.bat directly, so the loop runs unattended and the dashboard
-' (run_dashboard.py, opened by the bat) is the only window on screen. Nothing
+' (output/live_dashboard.py, opened by the bat) is the only window on screen. Nothing
 ' about the loop itself changes: same bat, same working directory, same
 ' logging to logs\paper_loop.log.
 '

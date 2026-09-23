@@ -18,7 +18,7 @@ what it already emits:
 
 Run it in Windows Terminal (any width; the tables scroll horizontally):
 
-    .venv\\Scripts\\python.exe run_dashboard.py
+    .venv\\Scripts\\python.exe -m output.live_dashboard     (or scripts\\run_dashboard.bat)
 
 Keys: q quit, r force refresh.
 """
@@ -46,7 +46,7 @@ from config.sports import sport_of
 # so reuse ITS regexes rather than writing a second pair that could drift.
 from output.reporter import _BOOK_TRADE_OI_RE, _CALIBRATION_RE
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[1]
 LATEST = OUTPUT_DIR / "recommendations_latest.json"
 
 # Explicit hex, not the ANSI names ("green"/"red"/...): those are indexes into
@@ -231,7 +231,7 @@ def probe_loop() -> LoopInfo:
     # Not running (or the probe failed): fall back to what the scheduled task
     # WOULD run, so the header still describes the configured mode.
     try:
-        text = (ROOT / "run_paper_loop.bat").read_text(encoding="utf-8", errors="replace")
+        text = (ROOT / "scripts" / "run_paper_loop.bat").read_text(encoding="utf-8", errors="replace")
     except OSError:
         return info
     for line in text.splitlines():

@@ -1,4 +1,4 @@
-"""Offline tests for the live TUI dashboard's data layer (run_dashboard.py).
+"""Offline tests for the live TUI dashboard's data layer (output/live_dashboard.py).
 
 Everything here is pure-function: no network, no Kalshi client, no terminal.
 The rendering layer is exercised separately by Textual's own headless driver;
@@ -18,7 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from run_dashboard import (  # noqa: E402
+from output.live_dashboard import (  # noqa: E402
     GREEN, RED, AccountData, LATEST, calibration_mult, flow_components, fmt_countdown,
     fmt_duration, fmt_start_offset, load_scan, mark_pending, name_cell,
     name_column_width, pending_bets, record_card, record_text, short_source,

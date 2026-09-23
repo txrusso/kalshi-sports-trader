@@ -16,7 +16,7 @@ what it already emits:
           ->  output/paper_ledger.jsonl / live_ledger.jsonl
     here  <-  watches those files and redraws when they change
 
-Run it in Windows Terminal (any width; the signals table scrolls horizontally):
+Run it in Windows Terminal (any width; the tables scroll horizontally):
 
     .venv\\Scripts\\python.exe run_dashboard.py
 
@@ -37,6 +37,7 @@ from typing import Any, Optional
 from rich.text import Text
 
 from config.settings import DEFAULTS, EASTERN, OUTPUT_DIR
+from config.sports import sport_of
 # The book/trades/oi component scores and the calibration multiplier exist in
 # full ONLY inside the pre-built `rationale` string: signals/money_flow.py's
 # debug dict keeps the raw inputs and, in cross-market mode, the un-blended
@@ -48,10 +49,16 @@ from output.reporter import _BOOK_TRADE_OI_RE, _CALIBRATION_RE
 ROOT = Path(__file__).resolve().parent
 LATEST = OUTPUT_DIR / "recommendations_latest.json"
 
-GREEN = "bold green"
-RED = "bold red"
-CYAN = "cyan"
-YELLOW = "bold yellow"
+# Explicit hex, not the ANSI names ("green"/"red"/...): those are indexes into
+# the terminal's own 16-colour palette, so a monochrome or heavily-restyled
+# Windows Terminal scheme renders the whole dashboard in greys and the
+# green/red profit signal disappears. Truecolor bypasses the palette.
+GREEN = "bold #3fb950"
+RED = "bold #f85149"
+CYAN = "#58a6ff"
+YELLOW = "bold #e3b341"
+WHITE = "#e6edf3"
+MUTED = "#8b949e"
 DIM = "dim"
 
 
@@ -93,8 +100,11 @@ class AccountData:
     balance: Optional[float] = None
     today: tuple[int, int, float] = (0, 0, 0.0)
     overall: tuple[int, int, float] = (0, 0, 0.0)
+    today_by_sport: list[tuple[str, tuple[int, int, float]]] = field(default_factory=list)
+    overall_by_sport: list[tuple[str, tuple[int, int, float]]] = field(default_factory=list)
     open_positions: Optional[int] = None
     pending: list[dict] = field(default_factory=list)
+    unrealized: Optional[float] = None
     error: str = ""
 
 
@@ -143,6 +153,12 @@ def calibration_mult(rec: dict) -> Optional[float]:
             pass
     m = _CALIBRATION_RE.search(rec.get("rationale") or "")
     return float(m.group(1)) if m else None
+
+
+def short_source(source: str) -> str:
+    """'pregame_nfl_totals' -> 'nfl_totals'. Pregame is the default everywhere;
+    what matters at a glance is WHICH model, and that 'live' is not pregame."""
+    return (source or "flow-only").replace("pregame_", "")
 
 
 _INTERVAL_RE = re.compile(r"--interval\s+(\d+)")
@@ -214,8 +230,30 @@ def probe_loop() -> LoopInfo:
     return info
 
 
+def sport_records(bets: list[dict], outcomes: dict[str, bool],
+                  grade) -> list[tuple[str, tuple[int, int, float]]]:
+    """Per-sport (wins, losses, net), using the project's own ticker registry.
+
+    MLB/NFL/NBA/NHL share one account, one ledger and one dashboard, but they
+    are independently-validated models at very different stages of maturity, so
+    a single blended record hides which one is actually working -- the same
+    reason `cli.py settle` grew its BY SPORT block. Sports with nothing settled
+    are left out rather than shown as 0-0.
+    """
+    by: dict[str, list[dict]] = {}
+    for b in bets:
+        by.setdefault(sport_of(b.get("ticker") or ""), []).append(b)
+    out = []
+    for sport in sorted(by):
+        record = grade(by[sport], outcomes)
+        if record[0] + record[1]:
+            out.append((sport.upper(), record))
+    return out
+
+
 def load_account() -> AccountData:
-    """Balance, graded record, open positions and still-pending bets.
+    """Balance, graded record (total and per sport), open positions, and the
+    still-pending bets marked to the current market.
 
     Deliberately reuses engine/account_summary's own grading helpers instead of
     reimplementing them, so this panel can never disagree with what the loop
@@ -243,6 +281,7 @@ def load_account() -> AccountData:
     except Exception as e:
         errs.append(f"balance: {e}")
 
+    positions: list[dict] = []
     if client is not None:
         try:
             positions = (client.get_positions() or {}).get("market_positions") or []
@@ -265,14 +304,66 @@ def load_account() -> AccountData:
                    "nba": NbaDataClient(), "nhl": NhlDataClient()}
         outcomes = resolve_outcomes({b["ticker"] for b in bets}, clients)
         today = datetime.now(EASTERN).strftime("%Y-%m-%d")
-        data.today = _grade([b for b in bets if _game_date(b["ticker"]) == today], outcomes)
+        today_bets = [b for b in bets if _game_date(b["ticker"]) == today]
+        data.today = _grade(today_bets, outcomes)
         data.overall = _grade(bets, outcomes)
+        data.today_by_sport = sport_records(today_bets, outcomes, _grade)
+        data.overall_by_sport = sport_records(bets, outcomes, _grade)
         data.pending = pending_bets(bets, outcomes)
     except Exception as e:
         errs.append(f"ledger: {e}")
 
+    if client is not None and data.pending:
+        try:
+            mark_pending(data, client, positions, position_size)
+        except Exception as e:
+            errs.append(f"mark: {e}")
+
     data.error = "; ".join(errs)
     return data
+
+
+def mark_pending(data: AccountData, client, positions: list[dict], position_size) -> None:
+    """Mark each pending bet to the current market and total the unrealized P&L.
+
+    The cost basis comes from the POSITION (`market_exposure_dollars`), not the
+    ledger row: the position is what the exchange actually holds, so a partial
+    fill or a re-pegged maker order is reflected honestly rather than assumed to
+    have filled at the requested size and price.
+
+    The mark is the BID on the side we hold -- what the position could actually
+    be liquidated at right now -- not the mid. Marking at the mid would
+    systematically overstate unrealized P&L by half the spread on every row.
+
+    A pending bet with no position is an order that has not filled yet (the
+    ledger records a live order at submit time, and it may still be resting), so
+    it is left unmarked rather than shown as a loss.
+    """
+    from kalshi.normalize import parse_market
+
+    by_ticker = {p.get("ticker"): p for p in positions}
+    total = 0.0
+    marked = False
+    for bet in data.pending:
+        pos = by_ticker.get(bet.get("ticker"))
+        if pos is None:
+            continue
+        size = position_size(pos)
+        if size == 0:
+            continue
+        basis = float(pos.get("market_exposure_dollars") or 0.0)
+        try:
+            quote = parse_market(client.get_market(bet["ticker"]) or {})
+        except Exception:
+            continue
+        # position_fp is signed: positive = long YES, negative = long NO.
+        mark = quote.yes_bid if size > 0 else max(0.0, 1.0 - quote.yes_ask)
+        bet["_mark"] = mark
+        bet["_unrealized"] = abs(size) * mark - basis
+        bet["_filled"] = abs(size)
+        total += bet["_unrealized"]
+        marked = True
+    data.unrealized = total if marked else None
 
 
 def pending_bets(bets: list[dict], outcomes: dict[str, bool]) -> list[dict]:
@@ -318,7 +409,7 @@ def signed(value: Optional[float], fmt: str = "{:+.2f}", zero_dim: bool = True) 
         return Text(fmt.format(value), style=GREEN)
     if value < 0:
         return Text(fmt.format(value), style=RED)
-    return Text(fmt.format(value), style=DIM if zero_dim else "")
+    return Text(fmt.format(value), style=DIM if zero_dim else WHITE)
 
 
 def fmt_duration(seconds: float) -> str:
@@ -335,7 +426,7 @@ def fmt_countdown(target: Optional[datetime]) -> tuple[str, str]:
     delta = (target - datetime.now(timezone.utc)).total_seconds()
     if delta <= 0:
         return "scanning...", YELLOW
-    return fmt_duration(delta), "bold white" if delta > 60 else YELLOW
+    return fmt_duration(delta), "bold " + WHITE if delta > 60 else YELLOW
 
 
 def fmt_start_offset(start: Optional[datetime]) -> Text:
@@ -344,7 +435,7 @@ def fmt_start_offset(start: Optional[datetime]) -> Text:
         return Text("--", style=DIM)
     delta = (start - datetime.now(timezone.utc)).total_seconds()
     if delta > 0:
-        return Text(f"in {fmt_duration(delta)}", style="white")
+        return Text(f"in {fmt_duration(delta)}", style=WHITE)
     return Text(f"live {fmt_duration(-delta)}", style=YELLOW)
 
 
@@ -353,14 +444,36 @@ def record_text(record: tuple[int, int, float]) -> Text:
     n = wins + losses
     if n == 0:
         return Text("no settled bets", style=DIM)
-    t = Text(f"{wins}-{losses} ", style="bold white")
+    t = Text(f"{wins}-{losses} ", style="bold " + WHITE)
     t.append(f"({wins / n:.0%})  ", style=CYAN)
     t.append(f"{net:+.2f}", style=GREEN if net > 0 else RED if net < 0 else DIM)
     return t
 
 
+def record_card(record: tuple[int, int, float],
+                by_sport: list[tuple[str, tuple[int, int, float]]]) -> Text:
+    """The blended record on the first line, then one line per sport."""
+    t = record_text(record)
+    for name, (wins, losses, net) in by_sport:
+        t.append(f"\n{name} {wins}-{losses} ", style=MUTED)
+        t.append(f"{net:+.2f}", style=GREEN if net > 0 else RED if net < 0 else DIM)
+    return t
+
+
+def name_cell(name: str, ticker: str) -> Text:
+    """Two-line cell: the bet in full on top, its ticker beneath.
+
+    Stacking them is what lets both be shown untruncated -- side by side they
+    need ~85 columns between them, which pushed the right-hand columns off the
+    screen entirely.
+    """
+    t = Text(name or "", style="bold " + WHITE)
+    t.append("\n" + (ticker or ""), style=CYAN)
+    return t
+
+
 def flow_text(direction: str, score: float) -> Text:
-    style = GREEN if direction == "YES" else RED if direction == "NO" else DIM
+    style = GREEN if direction == "YES" else RED if direction == "NO" else MUTED
     return Text(f"{direction} {score:+.2f}", style=style)
 
 
@@ -380,6 +493,17 @@ def truncate(s: str, width: int) -> str:
     return s if len(s) <= width else s[: width - 1] + "…"
 
 
+def name_column_width(names: list[str], tickers: list[str],
+                      floor: int = 34, cap: int = 64) -> int:
+    """Width that shows every name and ticker in full, within reason.
+
+    Measured from the data rather than hardcoded, so a longer matchup than any
+    seen so far still renders in full instead of being silently cut off.
+    """
+    longest = max([len(s or "") for s in names + tickers] + [0])
+    return max(floor, min(cap, longest))
+
+
 # --------------------------------------------------------------------------
 # the app
 # --------------------------------------------------------------------------
@@ -388,16 +512,16 @@ from textual.app import App, ComposeResult                       # noqa: E402
 from textual.containers import Horizontal, Vertical              # noqa: E402
 from textual.widgets import DataTable, Footer, Header, Static    # noqa: E402
 
-SIGNAL_COLUMNS = [
-    ("#", 3), ("MATCHUP", 34), ("TICKER", 31), ("PX", 5), ("FAIR", 5),
-    ("CONF", 5), ("EDGE", 8), ("STAKE / CT", 15), ("FLOW", 11),
-    ("BOOK  TRD    OI", 19), ("SOURCE / CALIB", 22),
+# (label, width) for every column except the name column, whose width is
+# measured from the data at render time. Kept tight so the whole table fits a
+# normal window without horizontal scrolling.
+SIGNAL_TAIL = [
+    ("PX", 4), ("FAIR", 4), ("CONF", 4), ("EDGE", 7), ("STAKE / CT", 14),
+    ("FLOW", 10), ("BOOK  TRD    OI", 17), ("MODEL / CAL", 17),
 ]
-
-PENDING_COLUMNS = [
-    ("WHEN", 10), ("MATCHUP", 11), ("BET", 34), ("SIDE", 4), ("PX", 5),
-    ("CT", 7), ("WAGER", 7), ("EDGE", 7), ("CONF", 5), ("BOOK", 6),
-    ("ORDER", 9),
+PENDING_TAIL = [
+    ("SIDE", 4), ("PX", 4), ("CT", 5), ("WAGER", 6), ("MARK", 4),
+    ("UNREAL", 7), ("EDGE", 7), ("CONF", 4), ("BOOK", 5), ("ORDER", 8),
 ]
 
 
@@ -416,14 +540,14 @@ class DashboardApp(App):
     TITLE = "Kalshi money-flow agent"
     CSS = """
     Screen { background: $surface; }
-    #kpis { height: 5; padding: 0 1; }
+    #kpis { height: 7; padding: 0 1; }
     KpiCard {
-        width: 1fr; height: 5; content-align: center middle;
+        width: 1fr; height: 7; content-align: center middle;
         border: round $primary; padding: 0 1;
     }
     #tables { height: 1fr; }
+    #pending_box { height: 1fr; min-height: 10; padding: 0 1; }
     #signals_box { height: 2fr; padding: 0 1; }
-    #pending_box { height: 1fr; min-height: 8; padding: 0 1; }
     DataTable { height: 1fr; border: round $primary; }
     #status { height: 1; padding: 0 2; }
     """
@@ -451,24 +575,19 @@ class DashboardApp(App):
             yield KpiCard("NEXT SCAN", "kpi_next")
             yield KpiCard("COVERAGE", "kpi_coverage")
         with Vertical(id="tables"):
-            with Vertical(id="signals_box"):
-                yield DataTable(id="signals", cursor_type="row", zebra_stripes=True)
+            # Pending first: money already at risk outranks money we might risk.
             with Vertical(id="pending_box"):
                 yield DataTable(id="pending", cursor_type="row", zebra_stripes=True)
+            with Vertical(id="signals_box"):
+                yield DataTable(id="signals", cursor_type="row", zebra_stripes=True)
         yield Static("", id="status")
         yield Footer()
 
     def on_mount(self) -> None:
-        signals = self.query_one("#signals", DataTable)
-        signals.border_title = "SIGNALS — this cycle's recommendations"
-        for label, width in SIGNAL_COLUMNS:
-            signals.add_column(Text(label, style="bold"), width=width)
-
-        pending = self.query_one("#pending", DataTable)
-        pending.border_title = "PENDING — placed bets awaiting settlement"
-        for label, width in PENDING_COLUMNS:
-            pending.add_column(Text(label, style="bold"), width=width)
-
+        self.query_one("#pending", DataTable).border_title = (
+            "PENDING — placed bets awaiting settlement")
+        self.query_one("#signals", DataTable).border_title = (
+            "SIGNALS — this cycle's recommendations")
         self.reload_scan(force=True)
         self.refresh_account()
         self.refresh_loop_info()
@@ -477,6 +596,21 @@ class DashboardApp(App):
         self.set_interval(1.0, self.tick)
         self.set_interval(self._poll, self.reload_scan)
         self.set_interval(120.0, self.refresh_loop_info)
+
+    @staticmethod
+    def _sync_columns(table: DataTable, spec: list[tuple[str, int]]) -> None:
+        """Rebuild the table's columns when the measured layout changes.
+
+        DataTable fixes a column's width when it is added, so the name column
+        cannot simply grow -- the columns are rebuilt instead. Cheap: it only
+        happens when the longest name actually changes length.
+        """
+        if getattr(table, "_dash_col_spec", None) == spec:
+            return
+        table.clear(columns=True)
+        for label, width in spec:
+            table.add_column(Text(label, style="bold"), width=width)
+        table._dash_col_spec = spec
 
     # -- data refresh ------------------------------------------------------
     def reload_scan(self, force: bool = False) -> None:
@@ -496,8 +630,9 @@ class DashboardApp(App):
         self.render_kpis()
         if not force:
             # A new cycle is the only thing that can have changed the account
-            # state (a bet may have been placed), so this is the only time the
-            # expensive refresh is warranted.
+            # state (a bet may have been placed, and every pending bet needs
+            # re-marking), so this is the only time the expensive refresh is
+            # warranted.
             self.refresh_account()
 
     def refresh_account(self) -> None:
@@ -563,10 +698,11 @@ class DashboardApp(App):
         self._set("kpi_balance",
                   Text(f"${acct.balance:.2f}", style=GREEN) if acct.balance is not None
                   else Text("unavailable", style=DIM))
-        self._set("kpi_today", record_text(acct.today))
-        self._set("kpi_overall", record_text(acct.overall))
+        self._set("kpi_today", record_card(acct.today, acct.today_by_sport))
+        self._set("kpi_overall", record_card(acct.overall, acct.overall_by_sport))
 
-        mode = Text(self._loop_info.mode, style=YELLOW if "LIVE" in self._loop_info.mode else CYAN)
+        mode = Text(self._loop_info.mode,
+                    style=YELLOW if "LIVE" in self._loop_info.mode else CYAN)
         if self._loop_info.running:
             mode.append(f"\npid {self._loop_info.pid}", style=DIM)
         else:
@@ -577,7 +713,7 @@ class DashboardApp(App):
             local = self._scan.generated_at.astimezone(EASTERN)
             age = (datetime.now(timezone.utc)
                    - self._scan.generated_at.astimezone(timezone.utc)).total_seconds()
-            scan_text = Text(local.strftime("%H:%M:%S ET"), style="bold white")
+            scan_text = Text(local.strftime("%H:%M:%S ET"), style="bold " + WHITE)
             scan_text.append(f"\n{fmt_duration(age)} ago", style=DIM)
         else:
             scan_text = Text("no scan yet", style=DIM)
@@ -585,8 +721,8 @@ class DashboardApp(App):
         self._set("kpi_next", self._next_scan_text())
 
         if self._scan:
-            cov = Text(f"{len(self._scan.recs)} recs", style="bold white")
-            cov.append(f"\n{self._scan.scanned} scanned / {self._scan.deep_scanned} deep",
+            cov = Text(f"{len(self._scan.recs)} recs", style="bold " + WHITE)
+            cov.append(f"\n{self._scan.scanned} scanned\n{self._scan.deep_scanned} deep",
                        style=DIM)
         else:
             cov = Text("--", style=DIM)
@@ -594,62 +730,76 @@ class DashboardApp(App):
 
     def render_signals(self) -> None:
         table = self.query_one("#signals", DataTable)
+        recs = self._scan.recs if self._scan else []
+        width = name_column_width([r.get("headline") or r.get("title") or "" for r in recs],
+                                  [r.get("ticker") or "" for r in recs])
+        self._sync_columns(table, [("#", 3), ("MATCHUP / TICKER", width)] + SIGNAL_TAIL)
         table.clear()
-        if self._scan is None:
-            return
-        for i, r in enumerate(self._scan.recs, 1):
+        for i, r in enumerate(recs, 1):
             book, trades, oi = flow_components(r)
             cal = calibration_mult(r)
             fair = r.get("fair_prob")
-            conf = float(r.get("confidence") or 0.0)
 
-            src_cell = Text(truncate(r.get("fair_source") or "flow-only", 15), style="white")
+            model = Text(short_source(r.get("fair_source")), style=WHITE)
             if cal is not None:
-                src_cell.append(f" {cal:.2f}x", style=GREEN if cal >= 1 else RED)
+                model.append(f" {cal:.2f}x", style=GREEN if cal >= 1 else RED)
 
             headline = r.get("headline") or r.get("title") or r.get("ticker") or ""
+            name = name_cell(headline, r.get("ticker", ""))
             # A conflict is the loop's own warning that money flow disagrees with
-            # fair value; the console marks it with a leading glyph, so keep it
-            # visible here rather than silently flattening it into a normal row.
-            name = Text(truncate(headline, 34),
-                        style="bold magenta" if r.get("conflict") else "bold white")
+            # fair value; the console marks it, so keep it visible here too.
+            if r.get("conflict"):
+                name.stylize("bold #d2a8ff", 0, len(headline))
 
             table.add_row(
                 Text(str(i), style=DIM),
                 name,
-                Text(r.get("ticker", ""), style=CYAN),
-                Text(f"{float(r.get('entry_price') or 0):.2f}", style="white"),
+                Text(f"{float(r.get('entry_price') or 0):.2f}", style=WHITE),
                 Text(f"{fair:.0%}" if fair is not None else "--",
-                     style="white" if fair is not None else DIM),
-                Text(f"{conf:.2f}", style=YELLOW),
+                     style=WHITE if fair is not None else DIM),
+                Text(f"{float(r.get('confidence') or 0):.2f}", style=YELLOW),
                 signed(r.get("edge_cents"), "{:+.1f}c", zero_dim=False),
                 Text(f"${float(r.get('suggested_stake_usd') or 0):.2f} / "
-                     f"{float(r.get('suggested_contracts') or 0):.2f}ct", style="white"),
+                     f"{float(r.get('suggested_contracts') or 0):.2f}ct", style=WHITE),
                 flow_text(r.get("flow_direction", "?"),
                           float(r.get("money_flow_score") or 0.0)),
                 bto_text(book, trades, oi),
-                src_cell,
+                model,
+                height=2,
             )
 
     def render_pending(self) -> None:
         table = self.query_one("#pending", DataTable)
-        table.clear()
         pending = self._account.pending
-        table.border_title = (f"PENDING — {len(pending)} placed bet(s) "
-                              f"awaiting settlement")
+        width = name_column_width([b.get("label") or "" for b in pending],
+                                  [b.get("ticker") or "" for b in pending])
+        self._sync_columns(table, [("WHEN", 10), ("BET / TICKER", width)] + PENDING_TAIL)
+        table.clear()
+
+        title = f"PENDING — {len(pending)} placed bet(s) awaiting settlement"
+        if self._account.unrealized is not None:
+            title += f"   unrealized {self._account.unrealized:+.2f}"
+        table.border_title = title
+
         for b in pending:
+            unreal = b.get("_unrealized")
+            mark = b.get("_mark")
             table.add_row(
                 fmt_start_offset(b.get("_start")),
-                Text(truncate(b.get("matchup") or "", 11), style="white"),
-                Text(truncate(b.get("label") or "", 34), style="bold white"),
+                name_cell(b.get("label") or "", b.get("ticker") or ""),
                 Text(b.get("side", ""), style=GREEN if b.get("side") == "YES" else RED),
-                Text(f"{float(b.get('entry_price') or 0):.2f}", style="white"),
-                Text(f"{float(b.get('contracts') or 0):.2f}", style="white"),
-                Text(f"${float(b.get('wager_usd') or 0):.2f}", style="white"),
+                Text(f"{float(b.get('entry_price') or 0):.2f}", style=WHITE),
+                Text(f"{float(b.get('contracts') or 0):.2f}", style=WHITE),
+                Text(f"${float(b.get('wager_usd') or 0):.2f}", style=WHITE),
+                Text(f"{mark:.2f}" if mark is not None else "--",
+                     style=WHITE if mark is not None else DIM),
+                signed(unreal, "{:+.2f}", zero_dim=False) if unreal is not None
+                else Text("--", style=DIM),
                 signed(b.get("edge_cents"), "{:+.1f}c", zero_dim=False),
                 Text(f"{float(b.get('confidence') or 0):.2f}", style=YELLOW),
                 Text(b.get("_src", ""), style=CYAN if b.get("_src") == "live" else DIM),
-                Text(truncate(b.get("order_status") or "-", 9), style=DIM),
+                Text(truncate(b.get("order_status") or "-", 8), style=DIM),
+                height=2,
             )
 
     def render_status(self) -> None:
@@ -693,10 +843,13 @@ def _selftest() -> int:
     acct = load_account()
     print(f"account   : balance={acct.balance} today={acct.today} "
           f"overall={acct.overall} open_positions={acct.open_positions} "
-          f"pending={len(acct.pending)}")
-    for b in acct.pending[:5]:
-        print(f"  pending {b.get('matchup')} {b.get('label')!r} {b.get('side')} "
-              f"@{b.get('entry_price')} src={b.get('_src')} start={b.get('_start')}")
+          f"pending={len(acct.pending)} unrealized={acct.unrealized}")
+    print(f"  today by sport   : {acct.today_by_sport}")
+    print(f"  overall by sport : {acct.overall_by_sport}")
+    for b in acct.pending:
+        print(f"  pending {b.get('label')!r} {b.get('side')} @{b.get('entry_price')} "
+              f"x{b.get('contracts')} src={b.get('_src')} "
+              f"mark={b.get('_mark')} unrealized={b.get('_unrealized')}")
     if acct.error:
         print(f"  errors: {acct.error}")
     return 0

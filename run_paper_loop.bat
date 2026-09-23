@@ -3,15 +3,20 @@ cd /d "%~dp0"
 set PYTHONUNBUFFERED=1
 set PYTHONIOENCODING=utf-8
 
-rem Rotate the log once it gets big (>5 MB). This is also the clean seam for the
-rem 2026-09-22 encoding fix below: the pre-fix file is half UTF-16 and half
-rem UTF-8, which made it a binary blob to grep/tail and is a large part of why
-rem the notification problem went undiagnosed for days. Rotating starts a
-rem consistently-encoded file without throwing the history away. Done in
-rem PowerShell because batch date/time formatting is locale-dependent and
-rem unreliable for building a filename.
-rem The try/catch matters: if another process still holds the log open (an old
-rem loop that hasn't fully exited), Move-Item fails and would otherwise dump a
+rem Rotate the log once it gets big (>5 MB). The REAL rotation now happens on
+rem loop EXIT, at the bottom of this file -- this one is only the fallback for
+rem a session that was hard-killed before it could get there (`schtasks /End`
+rem takes the whole tree down, bat included).
+rem Rotating at start could not be relied on, and in practice almost never
+rem fired: start is exactly the moment a previous loop is most likely to still
+rem be holding the file, and Move-Item then fails. The log sat at 8 MB against
+rem a 5 MB threshold for days because of this, and the same lock silently ate
+rem the `paper loop started` marker below (cmd's >> cannot open a file
+rem PowerShell's Add-Content has open), which is a large part of why a
+rem duplicate loop went unnoticed on 2026-09-23.
+rem Done in PowerShell because batch date/time formatting is locale-dependent
+rem and unreliable for building a filename. The try/catch still matters: if
+rem something does hold the log, Move-Item fails and would otherwise dump a
 rem PowerShell error into the log. Rotation is housekeeping -- skipping it must
 rem never be louder than, or get in the way of, actually starting the loop.
 powershell -NoProfile -Command "$f='logs\paper_loop.log'; try { if ((Test-Path $f) -and ((Get-Item $f).Length -gt 5MB)) { Move-Item $f ('logs\paper_loop_' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.log') -Force -ErrorAction Stop } } catch { }"
@@ -33,3 +38,15 @@ rem so the log became unreadable to grep, tail, and every other text tool.
 rem ForEach-Object keeps the console echo (useful when this is run by hand)
 rem while pinning the file to UTF-8, matching what cmd's own `>>` above writes.
 powershell -NoProfile -Command "& '.venv\Scripts\python.exe' -u cli.py loop --interval 600 --live --in-game 2>&1 | ForEach-Object { Write-Host $_; Add-Content -Path 'logs\paper_loop.log' -Value $_ -Encoding UTF8 }"
+
+rem ---------------------------------------------------------------------------
+rem The loop has exited, so NOTHING holds logs\paper_loop.log any more -- this is
+rem the one moment rotation can actually succeed, which is why it lives here and
+rem not only at the top. Reached whenever the python tree is stopped but this bat
+rem survives, which is what the documented restart does (`taskkill /PID <launcher>
+rem /T /F` kills python and lets this pipeline drain). A `schtasks /End` kills the
+rem bat too and skips this; the fallback rotate at the top then catches it on the
+rem next start, when the file is finally free.
+echo ===== paper loop exited %DATE% %TIME% =====>> logs\paper_loop.log
+powershell -NoProfile -Command "$f='logs\paper_loop.log'; try { if ((Test-Path $f) -and ((Get-Item $f).Length -gt 5MB)) { Move-Item $f ('logs\paper_loop_' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.log') -Force -ErrorAction Stop } } catch { }"
+

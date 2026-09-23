@@ -26,7 +26,7 @@ rem and a TUI cannot render into a pipe.
 rem Guarded two ways: skipped if a dashboard is already up (so a loop
 rem restart doesn't stack windows), and wrapped in try/catch so a viewer
 rem that fails to open can never stop the loop from starting.
-powershell -NoProfile -Command "try { $up = Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*run_dashboard.py*' }; if (-not $up) { $here = (Get-Location).Path; if (Get-Command wt.exe -ErrorAction SilentlyContinue) { Start-Process wt.exe -ArgumentList '-d', $here, 'cmd', '/k', 'run_dashboard.bat' } else { Start-Process cmd.exe -ArgumentList '/k','run_dashboard.bat' -WorkingDirectory $here } } } catch { }"
+powershell -NoProfile -Command "try { $up = Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*run_dashboard.py*' }; if (-not $up) { $here = (Get-Location).Path; $bat = Join-Path $here 'run_dashboard.bat'; if (Get-Command wt.exe -ErrorAction SilentlyContinue) { Start-Process wt.exe -ArgumentList '-d', $here, 'cmd', '/k', $bat } else { Start-Process cmd.exe -ArgumentList '/k', $bat -WorkingDirectory $here } } } catch { }"
 
 rem NOT `Tee-Object -FilePath`: in Windows PowerShell 5.1 that writes UTF-16LE,
 rem so the log became unreadable to grep, tail, and every other text tool.

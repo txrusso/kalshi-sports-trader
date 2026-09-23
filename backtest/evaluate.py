@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import gzip
 import json
 from datetime import datetime, timezone
 
@@ -38,12 +39,35 @@ __all__ = ["load_rows", "resolve_outcomes", "graded_bets", "evaluate", "_game_da
 
 
 def load_rows(since: str | None) -> list[dict]:
+    """Every snapshot row, oldest day first.
+
+    Reads both `YYYY-MM-DD.jsonl` and `YYYY-MM-DD.jsonl.gz` transparently. Old
+    days are compressed in place (see scripts note in CLAUDE.md): the rows are
+    mostly repeated ticker/title/timestamp strings, so they gzip about 12x, and
+    a day file decompresses in ~0.2s -- far cheaper than keeping a quarter of a
+    gigabyte of plain text around, and far better than deleting the history the
+    backtests depend on.
+
+    A day present in BOTH forms (a compress that was interrupted before the
+    original was removed) is read once, from the plain file.
+    """
+    by_day: dict[str, str] = {}
+    for path in glob.glob(str(SNAPSHOTS_DIR / "*.jsonl")) + \
+            glob.glob(str(SNAPSHOTS_DIR / "*.jsonl.gz")):
+        name = path.replace("\\", "/").rsplit("/", 1)[-1]
+        day = name.replace(".jsonl.gz", "").replace(".jsonl", "")
+        # Prefer the uncompressed copy when both exist, so an interrupted
+        # compression can never double-count a day.
+        if day not in by_day or not path.endswith(".gz"):
+            by_day[day] = path
+
     rows: list[dict] = []
-    for path in sorted(glob.glob(str(SNAPSHOTS_DIR / "*.jsonl"))):
-        day = path.split("/")[-1].split("\\")[-1].replace(".jsonl", "")
+    for day in sorted(by_day):
         if since and day < since:
             continue
-        with open(path, encoding="utf-8") as f:
+        path = by_day[day]
+        opener = gzip.open if path.endswith(".gz") else open
+        with opener(path, "rt", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if line:

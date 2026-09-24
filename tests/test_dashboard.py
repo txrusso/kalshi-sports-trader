@@ -25,6 +25,7 @@ from output.live_dashboard import (  # noqa: E402
     sport_records, _mode_from_args, signed, truncate,
     bet_eta, bet_fee, bet_side_prob, book_label, settled_bets, settled_summary, fmt_clock,
     game_key, group_recs, placed_events, profit_curves, rec_start, account_money, money_card,
+    bet_on, bet_on_cell, short_headline,
 )
 from engine.account_summary import _grade          # noqa: E402
 from kalshi.normalize import position_size         # noqa: E402
@@ -691,6 +692,71 @@ class AccountMoney(unittest.TestCase):
         self.assertEqual(lines, ["Balance: $22.87", "Cash:    $22.15", "Exposed: $1.38"])
         self.assertEqual(money_card(None, None, None).plain, "unavailable")
         self.assertIn("Exposed: n/a", money_card(22.15, 22.15, None).plain)
+
+
+
+class BetOn(unittest.TestCase):
+    """BET ON shows what the bet IS, not Kalshi's raw contract side."""
+
+    def test_totals_no_is_under(self):
+        # The case that looked like a double negative: NO on "Over 11.5" = Under 11.5.
+        self.assertEqual(bet_on("KXMLBTOTAL-26SEP232210SDLAD-12", "NO"), "UNDER")
+        self.assertEqual(bet_on("KXNFLTOTAL-26SEP10SFLAR-46", "YES"), "OVER")
+
+    def test_winner_backs_a_team(self):
+        self.assertEqual(bet_on("KXNFLGAME-26SEP13BUFHOU-BUF", "NO"), "HOU")
+        self.assertEqual(bet_on("KXNFLGAME-26SEP09NESEA-SEA", "YES"), "SEA")
+        self.assertEqual(bet_on("KXMLBGAME-26AUG061915MIAATL-MIA", "NO"), "ATL")   # time segment
+
+    def test_spread_reads_like_a_line(self):
+        self.assertEqual(bet_on("KXNFLSPREAD-26SEP13ATLPIT-ATL6", "YES"), "ATL -5.5")
+        self.assertEqual(bet_on("KXNFLSPREAD-26SEP13BALIND-BAL3", "NO"), "IND +2.5")
+
+    def test_unparseable_falls_back_to_the_raw_side(self):
+        self.assertEqual(bet_on("GARBAGE", "NO"), "NO")
+
+    def test_cell_keeps_the_kalshi_side_for_reference(self):
+        self.assertEqual(bet_on_cell("KXMLBTOTAL-26SEP232210SDLAD-12", "NO").plain.splitlines(),
+                         ["UNDER", "Kalshi NO"])
+
+
+
+class ShortHeadline(unittest.TestCase):
+    """BET / TICKER uses team abbreviations, matching BET ON."""
+
+    def test_winner(self):
+        self.assertEqual(short_headline("KXMLBGAME-26SEP232040AZCOL-COL", "YES"), "COL wins vs AZ")
+        self.assertEqual(short_headline("KXNFLGAME-26SEP13BUFHOU-BUF", "NO"), "HOU wins vs BUF")
+
+    def test_mlb_total_splits_the_blob_with_known_codes(self):
+        self.assertEqual(short_headline("KXMLBTOTAL-26SEP232040AZCOL-15", "NO"), "AZ vs COL Under 14.5")
+        self.assertEqual(short_headline("KXMLBTOTAL-26SEP231940CWSKC-10", "YES"), "CWS vs KC Over 9.5")
+
+    def test_nfl_total(self):
+        self.assertEqual(short_headline("KXNFLTOTAL-26SEP27LVNO-47", "NO"), "LV vs NO Under 46.5")
+
+    def test_spread(self):
+        self.assertEqual(short_headline("KXNFLSPREAD-26SEP13BALIND-BAL3", "NO"),
+                         "IND covers +2.5 vs BAL")
+        self.assertEqual(short_headline("KXNFLSPREAD-26SEP13ATLPIT-ATL6", "YES"),
+                         "ATL covers -5.5 vs PIT")
+
+    def test_agrees_with_bet_on(self):
+        for tk, side in (("KXMLBTOTAL-26SEP232210SDLAD-12", "NO"), ("KXNFLGAME-26SEP09NESEA-SEA", "YES"),
+                         ("KXNFLSPREAD-26SEP13BALIND-BAL3", "NO")):
+            self.assertIn(bet_on(tk, side).split()[0].title() if bet_on(tk, side) in ("OVER", "UNDER")
+                          else bet_on(tk, side).split()[0], short_headline(tk, side))
+
+    def test_unknown_mlb_code_falls_back_to_the_full_label(self):
+        self.assertEqual(short_headline("KXMLBTOTAL-26SEP231940XXXYYY-8", "YES", "Full label"),
+                         "Full label")
+        self.assertEqual(short_headline("GARBAGE", "YES", "Full label"), "Full label")
+
+    def test_bet_on_column_fits_kalshi_yes(self):
+        from output.live_dashboard import PENDING_TAIL, SETTLED_TAIL
+        for tail in (PENDING_TAIL, SETTLED_TAIL):
+            width = dict(tail)["BET ON"]
+            self.assertGreaterEqual(width, len("Kalshi YES"))
 
 
 if __name__ == "__main__":

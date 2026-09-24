@@ -4,5 +4,5 @@ pandas>=2.0
 python-dateutil>=2.8
 matplotlib>=3.8
 textual>=0.80        # live terminal dashboard (output/live_dashboard.py)
-textual-plotext>=1.0 # the dashboard's Graph tab (pulls in plotext<6)
+textual-plotext>=1.0 # the dashboard's Cum PnL tab (pulls in plotext<6)
 rich>=13.7           # colored cell rendering inside the dashboard

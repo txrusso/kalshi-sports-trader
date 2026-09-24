@@ -20,7 +20,8 @@ Run it in Windows Terminal (any width; the tables scroll horizontally):
 
     .venv\\Scripts\\python.exe -m output.live_dashboard     (or scripts\\run_dashboard.bat)
 
-Keys: q quit, r force refresh, p / s / g switch the Pending / Settled / Graph tabs.
+Keys: q quit, r force refresh, t today/yesterday; 1-6 (or p / s / g) switch the tabs:
+Pending, Settled, Cum PnL, Model, Rec Table, Cal Table.
 """
 from __future__ import annotations
 
@@ -37,7 +38,7 @@ from typing import Any, Optional
 from rich.text import Text
 
 from config.settings import DEFAULTS, EASTERN, OUTPUT_DIR
-from config.sports import sport_of
+from config.sports import market_kind, sport_of
 # The book/trades/oi component scores and the calibration multiplier exist in
 # full ONLY inside the pre-built `rationale` string: signals/money_flow.py's
 # debug dict keeps the raw inputs and, in cross-market mode, the un-blended
@@ -45,6 +46,11 @@ from config.sports import sport_of
 # shows. output/reporter.py already scrapes them back out for its own layout,
 # so reuse ITS regexes rather than writing a second pair that could drift.
 from output.reporter import _BOOK_TRADE_OI_RE, _CALIBRATION_RE
+from output.dashboard_stats import (  # noqa: E402  (bet_fee re-exported for callers)
+    Drawdown, LogHealth, RestingOrders, Tally, TaskStatus, TodayRisk, ChannelStatus,
+    alert_status, bet_fee, calibration_table, drawdown, graded_rows, log_health,
+    parse_calibration_log, parse_tasks, rec_table, resting_orders, tally, today_risk,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 LATEST = OUTPUT_DIR / "recommendations_latest.json"
@@ -110,6 +116,14 @@ class AccountData:
     curves: dict[str, list[tuple[datetime, float]]] = field(default_factory=dict)
     unrealized: Optional[float] = None
     placed: dict[str, dict[str, datetime]] = field(default_factory=dict)
+    graded: list[dict] = field(default_factory=list)      # every settled real bet
+    totals: Optional[Tally] = None                         # fees / expected, all bets
+    drawdown: Optional[Drawdown] = None
+    today_risk: Optional[TodayRisk] = None
+    yesterday: tuple[int, int, float] = (0, 0, 0.0)
+    yesterday_by_sport: list[tuple[str, tuple[int, int, float]]] = field(default_factory=list)
+    yesterday_risk: Optional[TodayRisk] = None
+    resting: Optional[RestingOrders] = None                # unfilled orders on the book
     error: str = ""
 
 
@@ -249,6 +263,61 @@ def probe_loop() -> LoopInfo:
     return info
 
 
+LOOP_LOG = ROOT / "logs" / "paper_loop.log"
+ALERT_LOG = ROOT / "logs" / "notifications.jsonl"
+TASK_NAMES = ("KalshiPaperLoop", "KalshiLoopStop", "KalshiSettle", "KalshiSnapshotCompress")
+TASK_LABELS = {"KalshiPaperLoop": "start", "KalshiLoopStop": "stop",
+               "KalshiSettle": "settle", "KalshiSnapshotCompress": "compress"}
+
+
+@dataclass
+class HealthData:
+    """Loop health for the NEXT SCAN card, plus the calibration table the loop
+    logged. Read from files the loop already writes and one Task Scheduler
+    query -- read-only, like everything else here."""
+    log: LogHealth = field(default_factory=LogHealth)
+    alerts: dict[str, ChannelStatus] = field(default_factory=dict)
+    tasks: list[TaskStatus] = field(default_factory=list)
+    calibration: dict[str, dict] = field(default_factory=dict)
+    error: str = ""
+
+
+def _read_text(path: Path) -> str:
+    try:
+        return path.read_bytes().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def probe_tasks() -> list[TaskStatus]:
+    """Last run / result / next run of the four scheduled tasks."""
+    names = ",".join(f"'{n}'" for n in TASK_NAMES)
+    ps = (f"foreach ($n in {names}) {{ try {{ $i = Get-ScheduledTask -TaskName $n "
+          f"-ErrorAction Stop | Get-ScheduledTaskInfo; '{{0}}|{{1}}|{{2}}|{{3}}' -f $n, "
+          f"$i.LastRunTime.ToString('o'), $i.LastTaskResult, $i.NextRunTime.ToString('o') }} "
+          f"catch {{ '{{0}}|||' -f $n }} }}")
+    try:
+        out = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                             capture_output=True, text=True, timeout=25).stdout
+    except Exception:
+        return []
+    return parse_tasks(out.splitlines())
+
+
+def load_health() -> HealthData:
+    h = HealthData()
+    try:
+        text = _read_text(LOOP_LOG)
+        h.log = log_health(text)
+        h.calibration = parse_calibration_log(text)
+        today = datetime.now(EASTERN).strftime("%Y-%m-%d")
+        h.alerts = alert_status(_read_text(ALERT_LOG), today)
+        h.tasks = probe_tasks()
+    except Exception as e:                                        # pragma: no cover
+        h.error = f"{type(e).__name__}: {e}"
+    return h
+
+
 def sport_records(bets: list[dict], outcomes: dict[str, bool],
                   grade) -> list[tuple[str, tuple[int, int, float]]]:
     """Per-sport (wins, losses, net), using the project's own ticker registry.
@@ -336,6 +405,12 @@ def load_account() -> AccountData:
         except Exception as e:
             errs.append(f"positions: {e}")
 
+    if client is not None:
+        try:
+            data.resting = resting_orders(client.get_orders(status="resting"))
+        except Exception as e:
+            errs.append(f"orders: {e}")
+
     if bal is not None:
         data.balance, data.cash, data.exposed = account_money(
             bal, positions if positions_ok else None, position_size)
@@ -369,6 +444,16 @@ def load_account() -> AccountData:
         data.placed = placed_events(all_bets)
         data.settled = settled_bets(all_bets, outcomes)
         data.curves = profit_curves(bets, outcomes)
+        data.graded = graded_rows(bets, outcomes)
+        data.totals = tally(data.graded)
+        data.drawdown = drawdown(data.curves.get("Overall", []))
+        data.today_risk = today_risk(bets, outcomes, today, _game_date)
+        # Yesterday, on exactly the same definitions (the game's ET date).
+        yday = (datetime.now(EASTERN) - timedelta(days=1)).strftime("%Y-%m-%d")
+        yday_bets = [b for b in bets if _game_date(b["ticker"]) == yday]
+        data.yesterday = _grade(yday_bets, outcomes)
+        data.yesterday_by_sport = sport_records(yday_bets, outcomes, _grade)
+        data.yesterday_risk = today_risk(bets, outcomes, yday, _game_date)
     except Exception as e:
         errs.append(f"ledger: {e}")
 
@@ -447,21 +532,6 @@ def pending_bets(bets: list[dict], outcomes: dict[str, bool]) -> list[dict]:
 
 
 SETTLED_DAYS = 7
-
-
-def bet_fee(bet: dict) -> float:
-    """Kalshi's fee on this bet, in dollars.
-
-    The fee the live ledger recorded when there is one (maker fills write the
-    real `fees_usd`); otherwise config/fees.py's model -- the same formula
-    `cli.py fees` audits against every real fill. Offline: the per-series
-    multiplier comes from its measured fallback table, not a live GET.
-    """
-    if bet.get("fees_usd") is not None:
-        return float(bet["fees_usd"])
-    from config.fees import fee_for
-    return fee_for(float(bet.get("contracts") or 0), float(bet.get("entry_price") or 0),
-                   bet.get("ticker") or "", is_taker=bet.get("execution") != "maker")
 
 
 def settled_bets(bets: list[dict], outcomes: dict[str, bool],
@@ -794,6 +864,175 @@ def money_card(balance: Optional[float], cash: Optional[float],
     return t
 
 
+def drawdown_card(dd: Optional[Drawdown]) -> Text:
+    """Peak / Now / Down for the cumulative-profit curve (gross, like the cards)."""
+    if dd is None:
+        return Text("no settled bets", style=DIM)
+    t = Text()
+    t.append(f"{'Peak':<5}", style=MUTED)
+    t.append(f"{dd.peak:+.2f}", style=GREEN if dd.peak > 0 else WHITE)
+    if dd.peak_at is not None:
+        t.append(f" {dd.peak_at.astimezone(EASTERN):%b %d}".replace(" 0", " "), style=DIM)
+    t.append(f"\n{'Now':<5}", style=MUTED)
+    t.append(f"{dd.now:+.2f}", style=GREEN if dd.now > 0 else RED if dd.now < 0 else WHITE)
+    t.append(f"\n{'Down':<5}", style=MUTED)
+    if dd.at_peak:
+        t.append("at peak", style=GREEN)
+    else:
+        t.append(f"{dd.down:+.2f}", style=RED)
+        if dd.peak > 0:
+            t.append(f" ({dd.down / dd.peak:.0%})", style=DIM)
+    return t
+
+
+def today_risk_line(risk: Optional[TodayRisk], day: str = "today") -> Text:
+    """'bet $6.40' / 'open $1.38' -- money on today's games, and how much of it is
+    still riding. There is no daily loss cap, so this is where a bad day shows."""
+    if risk is None or not risk.n_bets:
+        return Text(f"no bets {day}", style=DIM)
+    t = Text(f"{'bet':<6}", style=MUTED)
+    t.append(f"${risk.staked:.2f}", style=WHITE)
+    t.append(f"\n{'open':<6}", style=MUTED)
+    t.append(f"${risk.open_risk:.2f}", style=YELLOW if risk.open_risk else DIM)
+    return t
+
+
+def totals_lines(totals: Optional[Tally]) -> Text:
+    """Fees paid and the model's expected profit, all settled bets."""
+    if totals is None or not totals.n:
+        return Text("")
+    t = Text(f"{'fees':<5}", style=MUTED)
+    t.append(f"-{totals.fees:.2f}", style=RED if totals.fees else DIM)
+    t.append(f"  net {totals.net:+.2f}", style=GREEN if totals.net > 0 else RED)
+    t.append(f"\n{'exp':<5}", style=MUTED)
+    t.append(f"{totals.expected:+.2f}", style=CYAN)
+    vs = totals.vs_expected
+    if vs is not None:
+        t.append(f"  vs {vs:+.2f}", style=GREEN if vs >= 0 else RED)
+    return t
+
+
+# <SERIES>-<YY><MON><DD>[<HHMM>]<TEAMS>-<LEAF>: the teams blob is away+home.
+_EVENT_RE = re.compile(r"^[A-Z]+-\d{2}[A-Z]{3}\d{2}(?:\d{4})?([A-Z]+)-([A-Z]+)(\d*)$")
+
+
+def bet_on(ticker: str, side: str) -> str:
+    """What the bet actually is, in plain terms -- never the raw contract side.
+
+    Kalshi has ONE contract per line, so the raw side reads backwards next to
+    the headline: an Under 11.5 is bought as NO on the "Over 11.5" contract,
+    and showing "NO" beside "Under 11.5" looks like a double negative. So:
+      totals  -> OVER / UNDER
+      winners -> the team being backed (YES = the ticker's team, NO = the other)
+      spreads -> the team covering: "KC -3.5" (YES) or "LV +3.5" (NO)
+    Falls back to the raw side if the ticker doesn't parse.
+    """
+    side = (side or "").upper()
+    kind = market_kind(ticker or "")
+    if kind == "total":
+        return "OVER" if side == "YES" else "UNDER" if side == "NO" else side
+    m = _EVENT_RE.match(ticker or "")
+    if not m:
+        return side
+    blob, team, digits = m.groups()
+    if blob.startswith(team):
+        opp = blob[len(team):]
+    elif blob.endswith(team):
+        opp = blob[: -len(team)]
+    else:
+        return side
+    if kind == "spread" and digits:
+        line = int(digits) - 0.5
+        return f"{team} -{line:g}" if side == "YES" else f"{opp} +{line:g}"
+    if kind == "winner":
+        return team if side == "YES" else opp
+    return side
+
+
+# Kalshi's 30 MLB team codes, collected from every MLB winner ticker in the
+# snapshot history and both ledgers (2026-09-23) rather than typed from memory.
+# Needed because an MLB TOTALS ticker names no single team (e.g. "AZCOL-15"),
+# so the away/home split has to come from the known codes; all 118 totals
+# matchups seen so far split exactly one way.
+MLB_TEAM_CODES = frozenset({
+    "ATH", "ATL", "AZ", "BAL", "BOS", "CHC", "CIN", "CLE", "COL", "CWS",
+    "DET", "HOU", "KC", "LAA", "LAD", "MIA", "MIL", "MIN", "NYM", "NYY",
+    "PHI", "PIT", "SD", "SEA", "SF", "STL", "TB", "TEX", "TOR", "WSH",
+})
+_TOTAL_RE = re.compile(r"^[A-Z]+-\d{2}[A-Z]{3}\d{2}(?:\d{4})?([A-Z]+)-(\d+)$")
+
+
+def _split_total_teams(ticker: str) -> Optional[tuple[str, str]]:
+    """(away, home) codes for a totals ticker, or None."""
+    sport = sport_of(ticker)
+    try:
+        if sport == "nfl":
+            from data.fair_value_nfl_totals import parse_total_ticker
+        elif sport == "nba":
+            from data.fair_value_nba_totals import parse_total_ticker
+        elif sport == "nhl":
+            from data.fair_value_nhl_totals import parse_total_ticker
+        else:
+            parse_total_ticker = None
+        if parse_total_ticker is not None:
+            pt = parse_total_ticker(ticker)
+            return (pt.away_abbr, pt.home_abbr) if pt else None
+    except Exception:
+        return None
+    m = _TOTAL_RE.match(ticker or "")
+    if not m:
+        return None
+    blob = m.group(1)
+    splits = [(blob[:i], blob[i:]) for i in range(2, len(blob) - 1)
+              if blob[:i] in MLB_TEAM_CODES and blob[i:] in MLB_TEAM_CODES]
+    return splits[0] if len(splits) == 1 else None
+
+
+def short_headline(ticker: str, side: str, fallback: str = "") -> str:
+    """The bet in team abbreviations, matching the BET ON column:
+    "COL wins vs AZ", "AZ vs COL Under 14.5", "IND covers +2.5 vs BAL".
+    Falls back to the full headline when the ticker can't be parsed."""
+    side = (side or "").upper()
+    kind = market_kind(ticker or "")
+    if kind == "total":
+        teams = _split_total_teams(ticker)
+        m = _TOTAL_RE.match(ticker or "")
+        if teams and m:
+            line = int(m.group(2)) - 0.5
+            word = "Over" if side == "YES" else "Under"
+            return f"{teams[0]} vs {teams[1]} {word} {line:g}"
+        return fallback
+    m = _EVENT_RE.match(ticker or "")
+    if not m:
+        return fallback
+    blob, team, digits = m.groups()
+    if blob.startswith(team):
+        opp = blob[len(team):]
+    elif blob.endswith(team):
+        opp = blob[: -len(team)]
+    else:
+        return fallback
+    if kind == "winner":
+        return f"{team} wins vs {opp}" if side == "YES" else f"{opp} wins vs {team}"
+    if kind == "spread" and digits:
+        line = int(digits) - 0.5
+        return (f"{team} covers -{line:g} vs {opp}" if side == "YES"
+                else f"{opp} covers +{line:g} vs {team}")
+    return fallback
+
+
+def bet_label(bet: dict) -> str:
+    """A placed bet's BET / TICKER text: team abbreviations, full label as fallback."""
+    return short_headline(bet.get("ticker") or "", bet.get("side") or "", bet.get("label") or "")
+
+
+def bet_on_cell(ticker: str, side: str) -> Text:
+    """Two-line cell: the plain bet, and the raw Kalshi side beneath for reference."""
+    t = Text(bet_on(ticker, side), style="bold " + WHITE)
+    t.append(f"\nKalshi {side}", style=DIM)
+    return t
+
+
 def record_text(record: tuple[int, int, float]) -> Text:
     wins, losses, net = record
     n = wins + losses
@@ -864,7 +1103,11 @@ def name_column_width(names: list[str], tickers: list[str],
 # --------------------------------------------------------------------------
 
 from textual.app import App, ComposeResult                       # noqa: E402
-from textual.containers import Horizontal, Vertical              # noqa: E402
+from textual.containers import Horizontal, Vertical, VerticalScroll  # noqa: E402
+from rich import box                                             # noqa: E402
+from rich.console import Group                                   # noqa: E402
+from rich.table import Table                                     # noqa: E402
+from output.model_explainer import Explanation, explain, segment_rows  # noqa: E402
 from textual.widgets import (DataTable, Footer, Header, Static,  # noqa: E402
                              TabbedContent, TabPane)
 from textual_plotext import PlotextPlot                           # noqa: E402
@@ -877,13 +1120,13 @@ SIGNAL_TAIL = [
     ("FLOW", 10), ("BOOK  TRD    OI", 17), ("MODEL / CAL", 17),
 ]
 PENDING_TAIL = [
-    ("SIDE", 4), ("PX", 4), ("CT", 5), ("WAGER", 6), ("MARK", 4),
+    ("BET ON", 10), ("PX", 4), ("CT", 5), ("WAGER", 6), ("MARK", 4),
     ("UNREAL", 7), ("EDGE", 7), ("CONF", 4), ("BOOK", 6), ("ORDER", 8),
 ]
 # Settled swaps the live mark for the realized result. PROFIT is gross (it sums
 # to the record cards), FEE is Kalshi's fee, NET = PROFIT - FEE, and ROI is NET
 # over the dollars wagered.
-# Line colours for the Graph tab. Deliberately NOT green/red: on this dashboard
+# Line colours for the Cum PnL tab. Deliberately NOT green/red: on this dashboard
 # those mean the sign of a number, and a sport's line can be on either side of
 # zero. Overall is the brightest so it reads as the headline.
 CURVE_COLORS = {
@@ -894,11 +1137,229 @@ CURVE_COLORS = {
     "NHL": (57, 197, 207),
 }
 
+REC_COLUMNS = [
+    ("MARKET", 12), ("BETS", 5), ("W-L", 8), ("WIN%", 5), ("STAKED", 9),
+    ("PROFIT", 8), ("FEES", 7), ("NET", 8), ("ROI", 7), ("EXPECTED", 9), ("vs EXP", 8),
+]
+CAL_COLUMNS = [
+    ("GROUP", 40), ("N", 5), ("PREDICTED", 10), ("ACTUAL", 8), ("DIFF", 9), ("MULT", 6),
+]
+
 SETTLED_TAIL = [
-    ("SIDE", 4), ("PX", 4), ("CT", 5), ("WAGER", 6), ("W/L", 4),
+    ("BET ON", 10), ("PX", 4), ("CT", 5), ("WAGER", 6), ("W/L", 4),
     ("PROFIT", 7), ("FEE", 6), ("NET", 7), ("ROI", 6),
     ("EDGE", 7), ("CONF", 4), ("BOOK", 6), ("ORDER", 8),
 ]
+
+
+# ---------------------------------------------------------------------------
+# Model tab renderers: pure functions of an Explanation -> rich renderables
+# ---------------------------------------------------------------------------
+
+STATUS_STYLE = {"PASS": GREEN, "BYPASS": YELLOW, "FAIL": RED, "INFO": CYAN, "N/A": DIM}
+
+
+def _section(title: str) -> Text:
+    return Text(f"\n{title}", style="bold " + YELLOW)
+
+
+def _kv(rows: list[tuple[str, Text | str]], key_width: int = 40) -> Table:
+    t = Table(box=None, show_header=False, pad_edge=False, padding=(0, 1))
+    t.add_column(style=MUTED, width=key_width, no_wrap=True)
+    t.add_column()
+    for k, v in rows:
+        t.add_row(k, v if isinstance(v, Text) else Text(str(v), style=WHITE))
+    return t
+
+
+def _check(ok: Optional[bool], what: str) -> Text:
+    if ok is None:
+        return Text(f"(can't rebuild {what})", style=DIM)
+    return (Text(f"rebuilt exactly", style=GREEN) if ok else
+            Text(f"REBUILD MISMATCH -- the explanation may be out of date", style=RED))
+
+
+def model_left(ex: Explanation) -> Group:
+    """Section B (what drove this number), then A (what the model is) at the bottom."""
+    head = Text(ex.headline, style="bold " + WHITE)
+    head.append(f"\n{ex.ticker}", style=CYAN)
+    head.append(f"   {bet_on(ex.ticker, ex.side)} @ {ex.price:.2f}", style="bold " + WHITE)
+    head.append(f"  (Kalshi {ex.side})", style=DIM)
+    parts: list = [head]
+
+    parts.append(_section("B. FAIR VALUE BUILD-UP  (money flow does NOT move this)"))
+    if ex.fair_yes is None:
+        parts.append(Text("no fair value: money-flow-only pick", style=DIM))
+    else:
+        rows = [(k, v) for k, v in ex.fair_steps]
+        rows.append(("= P(YES)", Text(f"{ex.fair_yes:.1%}", style="bold " + WHITE)))
+        rows.append(("  check", _check(ex.repro_ok, "fair value")))
+        rows.append((f"P(this bet wins, {ex.side})", Text(f"{ex.p_side:.1%}", style="bold " + CYAN)))
+        rows.append(("edge = P(win) - price", signed((ex.p_side - ex.price) * 100, "{:+.1f}c",
+                                                     zero_dim=False)))
+        parts.append(_kv(rows))
+
+    if ex.drivers:
+        parts.append(Text("\ndrivers -- edge now minus edge WITHOUT this input "
+                          "(separate tests, not additive):", style=MUTED))
+        t = Table(box=None, show_header=False, pad_edge=False, padding=(0, 1))
+        t.add_column(width=8, justify="right")
+        t.add_column(style="bold " + WHITE, width=20)
+        t.add_column(style=DIM)
+        for d in ex.drivers:
+            t.add_row(signed(d.cents, "{:+.1f}c", zero_dim=False), d.label, d.detail)
+        parts.append(t)
+    if ex.sensitivities:
+        t = Table(box=None, show_header=False, pad_edge=False, padding=(0, 1))
+        t.add_column(width=8, justify="right")
+        t.add_column(style=MUTED)
+        for d in ex.sensitivities:
+            t.add_row(signed(d.cents, "{:+.1f}c", zero_dim=False), f"if {d.label}")
+        parts.append(Text("sensitivity -- how the edge would move:", style=MUTED))
+        parts.append(t)
+
+    f = ex.flow
+    if f:
+        parts.append(_section("MONEY FLOW  (picks the side, feeds confidence)"))
+        w = f["weights"]
+        t = Table(box=box.SIMPLE_HEAD, pad_edge=False, padding=(0, 1))
+        for col, just in (("component", "left"), ("score", "right"), ("weight", "right"),
+                          ("contributes", "right")):
+            t.add_column(col, justify=just, header_style=MUTED)
+        wsum = w[0] + w[1] + (w[2] if f["oi_available"] else 0.0)
+        for name, key, wt, on in (("order-book imbalance", "book", w[0], True),
+                                  ("trade flow (aggressors)", "trades", w[1], True),
+                                  ("open-interest shift", "oi", w[2], f["oi_available"])):
+            share = wt / wsum if on else 0.0
+            t.add_row(name, signed(f[key], "{:+.2f}", zero_dim=False),
+                      Text(f"{share:.0%}" if on else "off (no prior scan)", style=DIM),
+                      signed(f[key] * share if on else None, "{:+.2f}", zero_dim=False))
+        parts.append(t)
+        rows = [("score (-1..+1) -> side", Text(f"{f['score']:+.2f} -> {f.get('direction')}",
+                                                  style="bold " + WHITE)),
+                ("strength (components agree)", f"{f['strength']:.2f}")]
+        if f.get("flow_conf") is not None:
+            rows.append(("flow confidence = strength x |score|", f"{f['flow_conf']:.3f}"))
+        raw = f.get("raw") or {}
+        bk, tr, lp, oi = (raw.get(k) or {} for k in ("book", "trades", "large_prints", "oi"))
+        if bk:
+            rows.append(("book depth YES / NO ($-weighted)",
+                         f"{bk.get('yes_wt', 0):,.0f} / {bk.get('no_wt', 0):,.0f}  ({bk.get('mode')})"))
+        if tr:
+            rows.append(("aggressive $ YES / NO",
+                         f"${tr.get('self_yes_d', 0):,.0f} / ${tr.get('self_no_d', 0):,.0f}"))
+        if lp:
+            rows.append(("large prints (whales)",
+                         f"{lp.get('n', 0)} >= ${lp.get('threshold', 0):,.0f}; "
+                         f"YES ${lp.get('yes_d', 0):,.0f} / NO ${lp.get('no_d', 0):,.0f}"))
+        if oi:
+            rows.append(("OI change / price change", f"{oi.get('d_oi', 0):+.0f} / {oi.get('d_price', 0):+.3f}"))
+        parts.append(_kv(rows))
+
+    if ex.conf_parts:
+        parts.append(_section("CONFIDENCE BUILD-UP  (calibration acts HERE, not on P)"))
+        t = Table(box=None, show_header=False, pad_edge=False, padding=(0, 1))
+        t.add_column(style=MUTED, width=52)
+        t.add_column(justify="right", width=8)
+        for label, v in ex.conf_parts:
+            t.add_row(label, Text(f"{v:+.3f}", style=WHITE))
+        t.add_row(Text("= raw confidence", style="bold " + WHITE),
+                  Text(f"{ex.conf_raw:.3f}", style="bold " + WHITE))
+        if ex.cal_mult is not None:
+            t.add_row(f"x calibration {ex.cal_mult:.3f} (past bets in this group)",
+                      Text(f"{ex.conf_repro:.3f}", style=YELLOW))
+        t.add_row("recorded by the loop", Text(f"{ex.conf_recorded:.3f}"
+                                               if ex.conf_recorded is not None else "--",
+                                               style=WHITE))
+        parts.append(t)
+        parts.append(_check(ex.conf_ok, "confidence"))
+
+    for note in ex.notes:
+        parts.append(Text(f"\nnote: {note}", style=DIM))
+
+    # Section A last: it is reference material (what the model is, where its data
+    # comes from) -- the per-bet numbers above are what gets read first.
+    parts.append(_section("A. MODEL & PIPELINE"))
+    parts.append(_kv([("model", Text(ex.model_name, style="bold " + WHITE)),
+                      ("fair-value source", ex.source)], 18))
+    steps = Table(box=None, show_header=False, pad_edge=False, padding=(0, 1))
+    steps.add_column(style=DIM, width=2)
+    steps.add_column(style=WHITE)
+    for i, step in enumerate(ex.pipeline, 1):
+        steps.add_row(str(i), step)
+    parts.append(steps)
+    parts.append(Text("inputs:", style=MUTED))
+    parts.append(Text("\n".join(f"  - {i}" for i in ex.inputs), style=WHITE))
+
+    return Group(*parts)
+
+
+def model_right(ex: Explanation, segments: list) -> Group:
+    """Sections C, D and E: gates, sizing/EV, and how this kind of bet has done."""
+    parts: list = [_section("C. EXECUTION GATES")]
+    t = Table(box=box.SIMPLE_HEAD, pad_edge=False, padding=(0, 1))
+    for col in ("gate", "value", "rule", "result"):
+        t.add_column(col, header_style=MUTED)
+    for g in ex.gates:
+        res = Text(g.status, style=STATUS_STYLE.get(g.status, WHITE))
+        if g.note:
+            res.append(f"  {g.note}", style=DIM)
+        t.add_row(Text(g.name, style="bold " + WHITE), g.value, Text(g.rule, style=MUTED), res)
+    parts.append(t)
+
+    parts.append(_section("D. SIZING & EXPECTED VALUE"))
+    z = ex.sizing
+    if not z or "f_star" not in z:
+        parts.append(Text("no Kelly stake (no fair value)", style=DIM))
+    else:
+        rows = [
+            ("P(win) p  /  price c", f"{z['p']:.1%}  /  {z['cost']:.2f}"),
+            ("full Kelly f* = (p - c) / (1 - c)", f"{z['f_star']:.2%}"),
+            (f"x Kelly fraction {z['kelly_fraction']:.2f}", f"{z['f_frac']:.2%}"),
+            (f"cap {z['cap']:.0%} of bankroll", Text("BINDING" if z["capped"] else "not binding",
+                                                     style=YELLOW if z["capped"] else DIM)),
+            ("= fraction staked", Text(f"{z['f_used']:.2%}", style="bold " + WHITE)),
+        ]
+        if z.get("bankroll"):
+            rows.append(("x bankroll at scan start (implied)", f"${z['bankroll']:.2f}"))
+        rows += [
+            ("= stake", Text(f"${z['stake']:.2f}", style="bold " + GREEN)),
+            ("/ price = contracts", Text(f"{z['contracts']:.2f}", style="bold " + WHITE)),
+            ("", ""),
+            ("EV per contract, before fees (p - c)", signed(z["ev_ct"] * 100, "{:+.1f}c", zero_dim=False)),
+            ("Kalshi fee per contract", Text(f"-{z['fee_ct'] * 100:.2f}c", style=MUTED)),
+            ("EV per contract, after fees", signed(z["ev_net_ct"] * 100, "{:+.2f}c", zero_dim=False)),
+            ("EV of the position", signed(z["ev_position"], "{:+.2f}", zero_dim=False)),
+            ("expected ROI on stake", signed(z["exp_roi"] * 100, "{:+.1f}%", zero_dim=False)),
+            ("break-even win rate (price + fee)", f"{z['breakeven']:.1%}"),
+        ]
+        parts.append(_kv(rows))
+
+    parts.append(_section("E. HOW THIS KIND OF BET HAS DONE  (all settled real bets)"))
+    if not segments:
+        parts.append(Text("no settled bets yet", style=DIM))
+    else:
+        t = Table(box=box.SIMPLE_HEAD, pad_edge=False, padding=(0, 1))
+        for col, just in (("model segment", "left"), ("bets", "right"), ("W-L", "right"),
+                          ("win%", "right"), ("net", "right"), ("ROI", "right"),
+                          ("vs exp", "right")):
+            t.add_column(col, justify=just, header_style=MUTED)
+        from output.model_explainer import model_name as _mn
+        for key, tl in segments:
+            this = key == ex.segment
+            name = Text(("> " if this else "  ") + _mn(*key).split(":")[0]
+                        + (" in-game" if key[2] else ""),
+                        style=("bold " + YELLOW) if this else WHITE)
+            t.add_row(name, str(tl.n), f"{tl.wins}-{tl.losses}",
+                      f"{tl.win_rate:.0%}" if tl.win_rate is not None else "--",
+                      signed(tl.net, "{:+.2f}", zero_dim=False),
+                      signed(tl.roi * 100 if tl.roi is not None else None, "{:+.1f}%",
+                             zero_dim=False),
+                      signed(tl.vs_expected, "{:+.2f}", zero_dim=False))
+        parts.append(t)
+        if not any(k == ex.segment for k, _ in segments):
+            parts.append(Text("  (no settled bets yet in this bet's segment)", style=DIM))
+    return Group(*parts)
 
 
 class KpiCard(Static):
@@ -916,23 +1377,35 @@ class DashboardApp(App):
     TITLE = "Kalshi money-flow agent"
     CSS = """
     Screen { background: $surface; }
-    #kpis { height: 7; padding: 0 1; }
+    #kpis { height: 8; padding: 0 1; }
     KpiCard {
-        width: 1fr; height: 7; content-align: center middle;
+        width: 1fr; height: 8; content-align: center middle;
         border: round $primary; padding: 0 1;
     }
+    #kpi_overall { width: 1.4fr; }
+    #kpi_scan { width: 0.8fr; }
+    #kpi_next { width: 2.1fr; content-align: left middle; }
     #tables { height: 1fr; }
     #pending_box { height: 1fr; min-height: 12; padding: 0 1; }
     #bets_tabs, #bets_tabs TabPane { height: 1fr; }
     #bets_tabs TabPane { padding: 0; }
     #signals_box { height: 1fr; padding: 0 1; }
+    #model_cols { height: 1fr; }
+    #model_left_scroll, #model_right_scroll { width: 1fr; height: 1fr; padding: 0 1; }
     DataTable { height: 1fr; border: round $primary; }
     #status { height: 1; padding: 0 2; }
     """
     BINDINGS = [("q", "quit", "Quit"), ("r", "force_refresh", "Refresh now"),
+                ("t", "toggle_day", "Today/Yesterday"),
                 ("p", "show_tab('tab_pending')", "Pending"),
                 ("s", "show_tab('tab_settled')", "Settled"),
-                ("g", "show_tab('tab_graph')", "Graph")]
+                ("g", "show_tab('tab_graph')", "Cum PnL"),
+                ("1", "show_tab('tab_pending')", "Pending"),
+                ("2", "show_tab('tab_settled')", "Settled"),
+                ("3", "show_tab('tab_graph')", "Cum PnL"),
+                ("4", "show_tab('tab_model')", "Model"),
+                ("5", "show_tab('tab_rec')", "Rec Table"),
+                ("6", "show_tab('tab_cal')", "Cal Table")]
 
     def __init__(self, latest: Path = LATEST, poll_seconds: float = 2.0) -> None:
         super().__init__()
@@ -941,6 +1414,9 @@ class DashboardApp(App):
         self._scan: Optional[ScanData] = None
         self._account = AccountData()
         self._loop_info = LoopInfo()
+        self._health = HealthData()
+        self._selected: Optional[str] = None     # ticker the Model tab explains
+        self._show_yesterday = False             # TODAY card toggled to YESTERDAY
         self._account_busy = False
         self._last_mtime: float = -1.0
         # NFL/NHL real start times, by ticker. Filled off the UI thread; until a
@@ -953,11 +1429,11 @@ class DashboardApp(App):
         yield Header(show_clock=True)
         with Horizontal(id="kpis"):
             yield KpiCard("ACCOUNT", "kpi_balance")
-            yield KpiCard("TODAY", "kpi_today")
+            yield KpiCard("TODAY  (t ⇄)", "kpi_today")
             yield KpiCard("OVERALL", "kpi_overall")
-            yield KpiCard("MODE", "kpi_mode")
+            yield KpiCard("DRAWDOWN", "kpi_drawdown")
             yield KpiCard("LAST SCAN", "kpi_scan")
-            yield KpiCard("NEXT SCAN", "kpi_next")
+            yield KpiCard("NEXT SCAN · LOOP HEALTH", "kpi_next")
             yield KpiCard("COVERAGE", "kpi_coverage")
         with Vertical(id="tables"):
             # Pending first: money already at risk outranks money we might risk.
@@ -968,8 +1444,20 @@ class DashboardApp(App):
                         yield DataTable(id="pending", cursor_type="row", zebra_stripes=True)
                     with TabPane("Settled", id="tab_settled"):
                         yield DataTable(id="settled", cursor_type="row", zebra_stripes=True)
-                    with TabPane("Graph", id="tab_graph"):
+                    with TabPane("Cum PnL", id="tab_graph"):
                         yield PlotextPlot(id="profit_graph")
+                                        # Explains whichever SIGNALS row the cursor is on.
+                    with TabPane("Model", id="tab_model"):
+                        with Horizontal(id="model_cols"):
+                            with VerticalScroll(id="model_left_scroll"):
+                                yield Static(Text("Select a row in SIGNALS to explain it.",
+                                                  style=DIM), id="model_left")
+                            with VerticalScroll(id="model_right_scroll"):
+                                yield Static("", id="model_right")
+                    with TabPane("Rec Table", id="tab_rec"):
+                        yield DataTable(id="rec_table", cursor_type="row", zebra_stripes=True)
+                    with TabPane("Cal Table", id="tab_cal"):
+                        yield DataTable(id="cal_table", cursor_type="row", zebra_stripes=True)
             with Vertical(id="signals_box"):
                 yield DataTable(id="signals", cursor_type="row", zebra_stripes=True)
         yield Static("", id="status")
@@ -1048,7 +1536,9 @@ class DashboardApp(App):
         self.render_pending()
         self.render_settled()
         self.render_graph()
-        self.render_signals()      # the BET column reads the ledgers too
+        self.render_rec_table()
+        self.render_cal_table()
+        self.render_signals()      # the BET column reads the ledgers too; also re-renders Model
 
     def refresh_starts(self) -> None:
         """Look up real start times for any NFL/NHL ticker not already known."""
@@ -1081,11 +1571,14 @@ class DashboardApp(App):
 
     def _loop_worker(self) -> None:
         info = probe_loop()
-        self.call_from_thread(self._apply_loop, info)
+        health = load_health()
+        self.call_from_thread(self._apply_loop, info, health)
 
-    def _apply_loop(self, info: LoopInfo) -> None:
+    def _apply_loop(self, info: LoopInfo, health: HealthData) -> None:
         self._loop_info = info
+        self._health = health
         self.render_kpis()
+        self.render_cal_table()
 
     def action_force_refresh(self) -> None:
         self.reload_scan(force=True)
@@ -1110,24 +1603,108 @@ class DashboardApp(App):
                 + timedelta(seconds=self._loop_info.interval))
 
     def _next_scan_text(self) -> Text:
-        if self._loop_info.source != "running process":
-            return Text("loop stopped", style=RED)
-        text, style = fmt_countdown(self._next_scan_at())
-        return Text(text, style=style)
+        """Countdown + mode on line 1, then loop health (#8-#11): uptime and
+        restarts, log errors/warnings/429s, alert delivery, scheduled tasks,
+        and unfilled orders. Anything wrong is red."""
+        info, h, acct = self._loop_info, self._health, self._account
+        now = datetime.now(timezone.utc)
+        if info.source != "running process":
+            t = Text("loop stopped", style=RED)
+        else:
+            text, style = fmt_countdown(self._next_scan_at())
+            t = Text(text, style=style)
+        t.append("   " + info.mode, style=YELLOW if "LIVE" in info.mode else CYAN)
+
+        lg = h.log
+        t.append(f"\n{'loop':<6}", style=MUTED)
+        if lg.session_start is not None:
+            t.append(f"up {fmt_duration((now - lg.session_start).total_seconds())}",
+                     style=WHITE)
+        t.append(" · ", style=DIM)
+        t.append(f"{lg.restarts} restart{'s' if lg.restarts != 1 else ''}",
+                 style=RED if lg.restarts else DIM)
+        if lg.last_cycle_secs is not None:
+            slow = lg.last_cycle_secs > info.interval * 0.8
+            t.append(f" · scan {lg.last_cycle_secs:.0f}s", style=RED if slow else DIM)
+
+        t.append(f"\n{'log':<6}", style=MUTED)
+        for i, (n, label) in enumerate(((lg.errors, "errors"), (lg.warnings, "warn"),
+                                        (lg.rate_limits, "429s"))):
+            if i:
+                t.append(" · ", style=DIM)
+            t.append(f"{n} {label}", style=(RED if n and label != "warn" else
+                                            YELLOW if n else DIM))
+
+        t.append(f"\n{'alerts':<6}", style=MUTED)
+        if not h.alerts:
+            t.append("none sent", style=DIM)
+        for i, (ch, name) in enumerate((("sms", "text"), ("push", "push"))):
+            st = h.alerts.get(ch)
+            if st is None:
+                continue
+            if i and "sms" in h.alerts:
+                t.append(" · ", style=DIM)
+            t.append(f"{name} ", style=DIM)
+            if st.last_at is not None:
+                t.append(fmt_clock(st.last_at, now), style=WHITE)
+            t.append(" ok" if st.last_ok else " FAILED", style=GREEN if st.last_ok else RED)
+            if st.failures_today:
+                t.append(f" ({st.failures_today} failed today)", style=RED)
+
+        t.append(f"\n{'tasks':<6}", style=MUTED)
+        if not h.tasks:
+            t.append("unknown", style=DIM)
+        else:
+            bad = [x for x in h.tasks if not x.ok]
+            t.append(f"{len(h.tasks) - len(bad)}/{len(h.tasks)} ok",
+                     style=RED if bad else GREEN)
+            if bad:
+                t.append(" · FAILED: " + ", ".join(TASK_LABELS.get(x.name, x.name) for x in bad),
+                         style=RED)
+            else:
+                upcoming = [x for x in h.tasks if x.next_run and x.name != "KalshiPaperLoop"]
+                if upcoming:
+                    nxt = min(upcoming, key=lambda x: x.next_run)
+                    t.append(f" · next {TASK_LABELS.get(nxt.name, nxt.name)} "
+                             f"{fmt_clock(nxt.next_run, now)}", style=DIM)
+
+        t.append(f"\n{'orders':<6}", style=MUTED)
+        ro = acct.resting
+        if ro is None:
+            t.append("unknown", style=DIM)
+        elif not ro.count:
+            t.append("0 resting unfilled", style=DIM)
+        else:
+            t.append(f"{ro.count} resting unfilled", style=YELLOW)
+            if ro.oldest_age_min is not None:
+                t.append(f" · oldest {fmt_duration(ro.oldest_age_min * 60)}",
+                         style=RED if ro.oldest_age_min > 30 else YELLOW)
+        return t
 
     def render_kpis(self) -> None:
         acct = self._account
         self._set("kpi_balance", money_card(acct.balance, acct.cash, acct.exposed))
-        self._set("kpi_today", record_card(acct.today, acct.today_by_sport))
-        self._set("kpi_overall", record_card(acct.overall, acct.overall_by_sport))
-
-        mode = Text(self._loop_info.mode,
-                    style=YELLOW if "LIVE" in self._loop_info.mode else CYAN)
-        if self._loop_info.running:
-            mode.append(f"\npid {self._loop_info.pid}", style=DIM)
+        if self._show_yesterday:
+            day = record_card(acct.yesterday, acct.yesterday_by_sport)
+            day.append("\n")
+            day.append_text(today_risk_line(acct.yesterday_risk, "yesterday"))
+            title = "YESTERDAY  (t ⇄)"
         else:
-            mode.append("\nLOOP NOT RUNNING", style=RED)
-        self._set("kpi_mode", mode)
+            day = record_card(acct.today, acct.today_by_sport)
+            day.append("\n")
+            day.append_text(today_risk_line(acct.today_risk))
+            title = "TODAY  (t ⇄)"
+        self._set("kpi_today", day)
+        try:
+            self.query_one("#kpi_today", KpiCard).border_title = title
+        except Exception:
+            pass
+        overall = record_card(acct.overall, acct.overall_by_sport)
+        if acct.totals is not None and acct.totals.n:
+            overall.append("\n")
+            overall.append_text(totals_lines(acct.totals))
+        self._set("kpi_overall", overall)
+        self._set("kpi_drawdown", drawdown_card(acct.drawdown))
 
         if self._scan and self._scan.generated_at:
             local = self._scan.generated_at.astimezone(EASTERN)
@@ -1163,13 +1740,24 @@ class DashboardApp(App):
         table.clear()
         now = datetime.now(timezone.utc)
         next_scan = self._next_scan_at()
+        tickers = []
         for sport, rows in groups:
             table.add_row(Text(""), sport_header(sport, len(rows)),
-                          *[Text("") for _ in SIGNAL_TAIL], height=1)
+                          *[Text("") for _ in SIGNAL_TAIL], height=1, key=f"__hdr_{sport}")
             for i, (r, start, trusted) in enumerate(rows, 1):
                 table.add_row(Text(str(i), style=DIM),
                               *self._signal_cells(r, start, trusted, now, next_scan),
-                              height=2)
+                              height=2, key=r.get("ticker"))
+                tickers.append(r.get("ticker"))
+        # Keep the Model tab on the same bet across refreshes; default to the first.
+        if self._selected not in tickers:
+            self._selected = tickers[0] if tickers else None
+        if self._selected:
+            try:
+                table.move_cursor(row=table.get_row_index(self._selected))
+            except Exception:
+                pass
+        self.render_model()
 
     def _signal_cells(self, r: dict, start: Optional[datetime], trusted: bool,
                       now: datetime, next_scan: Optional[datetime]) -> list[Text]:
@@ -1210,7 +1798,7 @@ class DashboardApp(App):
     def render_pending(self) -> None:
         table = self.query_one("#pending", DataTable)
         pending = self._account.pending
-        width = name_column_width([b.get("label") or "" for b in pending],
+        width = name_column_width([bet_label(b) for b in pending],
                                   [b.get("ticker") or "" for b in pending])
         self._sync_columns(table, [("WHEN", 10), ("BET / TICKER", width)] + PENDING_TAIL)
         table.clear()
@@ -1226,8 +1814,8 @@ class DashboardApp(App):
             mark = b.get("_mark")
             table.add_row(
                 fmt_start_offset(b.get("_start")),
-                name_cell(b.get("label") or "", b.get("ticker") or ""),
-                Text(b.get("side", ""), style=GREEN if b.get("side") == "YES" else RED),
+                name_cell(bet_label(b), b.get("ticker") or ""),
+                bet_on_cell(b.get("ticker") or "", b.get("side", "")),
                 Text(f"{float(b.get('entry_price') or 0):.2f}", style=WHITE),
                 Text(f"{float(b.get('contracts') or 0):.2f}", style=WHITE),
                 Text(f"${float(b.get('wager_usd') or 0):.2f}", style=WHITE),
@@ -1292,10 +1880,122 @@ class DashboardApp(App):
         plt.title("Cumulative profit ($, before fees -- matches the record cards)")
         widget.refresh()
 
+    def action_toggle_day(self) -> None:
+        """Flip the TODAY card between today and yesterday."""
+        self._show_yesterday = not self._show_yesterday
+        self.render_kpis()
+
+    def on_click(self, event) -> None:
+        # Clicking the TODAY card toggles it too.
+        if getattr(event.widget, "id", None) == "kpi_today":
+            self.action_toggle_day()
+
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        """Moving the cursor in SIGNALS re-targets the Model tab."""
+        if event.data_table.id != "signals" or event.row_key is None:
+            return
+        key = event.row_key.value
+        if not key or key.startswith("__hdr_") or key == self._selected:
+            return
+        self._selected = key
+        self.render_model()
+
+    def render_model(self) -> None:
+        recs = self._scan.recs if self._scan else []
+        rec = next((r for r in recs if r.get("ticker") == self._selected), None)
+        left = self.query_one("#model_left", Static)
+        right = self.query_one("#model_right", Static)
+        if rec is None:
+            left.update(Text("Select a row in SIGNALS to explain it.", style=DIM))
+            right.update("")
+            return
+        try:
+            ex = explain(rec)
+            left.update(model_left(ex))
+            right.update(model_right(ex, segment_rows(self._account.graded)))
+        except Exception as e:                                   # never kill the UI
+            left.update(Text(f"could not explain {self._selected}: "
+                             f"{type(e).__name__}: {e}", style=RED))
+            right.update("")
+
+    def render_rec_table(self) -> None:
+        """Record and money by sport and market kind, with fees and the model's
+        expected profit. Every settled real bet, not just a recent window."""
+        table = self.query_one("#rec_table", DataTable)
+        self._sync_columns(table, REC_COLUMNS)
+        table.clear()
+        rows = rec_table(self._account.graded)
+        table.border_title = ("RECORD BY MARKET — all settled bets · profit is before fees · "
+                              "EXPECTED = the model's edge x contracts · vs EXP = profit - expected")
+        for level, label, t in rows:
+            name = {"all": Text(label, style="bold " + YELLOW),
+                    "sport": Text(label, style="bold " + WHITE),
+                    "kind": Text("  " + label, style=MUTED)}[level]
+            table.add_row(
+                name,
+                Text(str(t.n), style=WHITE),
+                Text(f"{t.wins}-{t.losses}", style=WHITE),
+                Text(f"{t.win_rate:.0%}" if t.win_rate is not None else "--", style=CYAN),
+                Text(f"${t.staked:.2f}", style=WHITE),
+                signed(t.profit, "{:+.2f}", zero_dim=False),
+                Text(f"-{t.fees:.2f}", style=MUTED),
+                signed(t.net, "{:+.2f}", zero_dim=False),
+                signed(t.roi * 100 if t.roi is not None else None, "{:+.1f}%",
+                       zero_dim=False),
+                Text(f"{t.expected:+.2f}", style=CYAN),
+                signed(t.vs_expected, "{:+.2f}", zero_dim=False),
+            )
+
+    def render_cal_table(self) -> None:
+        """Two views of calibration: how placed bets did against the model's
+        stated probability, and the per-bucket multipliers Stakey is actually
+        applying right now (logged by the loop at start-up)."""
+        table = self.query_one("#cal_table", DataTable)
+        self._sync_columns(table, CAL_COLUMNS)
+        table.clear()
+        table.border_title = ("CALIBRATION — does a 60% bet win 60% of the time? "
+                              "DIFF = actual - predicted")
+
+        def header(text: str) -> None:
+            table.add_row(Text(text, style="bold " + YELLOW),
+                          *[Text("") for _ in CAL_COLUMNS[1:]])
+
+        header("PLACED BETS by model P(win)")
+        buckets = calibration_table(self._account.graded)
+        if not buckets:
+            table.add_row(Text("  no settled bets", style=DIM), *[Text("") for _ in CAL_COLUMNS[1:]])
+        for b in buckets:
+            table.add_row(
+                Text("  " + b["bucket"], style=WHITE),
+                Text(str(b["n"]), style=WHITE),
+                Text(f"{b['predicted']:.1%}", style=CYAN),
+                Text(f"{b['actual']:.1%}", style=WHITE),
+                signed(b["diff"] * 100, "{:+.1f}pt", zero_dim=False),
+                Text(""),
+            )
+        cal = self._health.calibration
+        header("STAKEY'S CALIBRATION (applied to CONF)")
+        if not cal:
+            table.add_row(Text("  not in the current log", style=DIM),
+                          *[Text("") for _ in CAL_COLUMNS[1:]])
+        for bucket, c in cal.items():
+            mult = c.get("multiplier")
+            exp, act = c.get("expected_wr"), c.get("win_rate")
+            table.add_row(
+                Text("  " + bucket, style=WHITE),
+                Text(str(c.get("n", "")), style=WHITE),
+                Text(f"{exp:.1%}" if exp is not None else "--", style=CYAN),
+                Text(f"{act:.1%}" if act is not None else "--", style=WHITE),
+                signed((act - exp) * 100 if exp is not None and act is not None else None,
+                       "{:+.1f}pt", zero_dim=False),
+                Text(f"{mult:.2f}x" if mult is not None else "--",
+                     style=(GREEN if mult and mult >= 1 else RED) if mult is not None else DIM),
+            )
+
     def render_settled(self) -> None:
         table = self.query_one("#settled", DataTable)
         rows = self._account.settled
-        width = name_column_width([b.get("label") or "" for b in rows],
+        width = name_column_width([bet_label(b) for b in rows],
                                   [b.get("ticker") or "" for b in rows])
         self._sync_columns(table, [("WHEN", 10), ("BET / TICKER", width)] + SETTLED_TAIL)
         table.clear()
@@ -1334,8 +2034,8 @@ class DashboardApp(App):
                 order = "no fill"
             table.add_row(
                 Text(fmt_clock(b["_start"], now), style=DIM),
-                name_cell(b.get("label") or "", b.get("ticker") or ""),
-                Text(b.get("side", ""), style=GREEN if b.get("side") == "YES" else RED),
+                name_cell(bet_label(b), b.get("ticker") or ""),
+                bet_on_cell(b.get("ticker") or "", b.get("side", "")),
                 Text(f"{float(b.get('entry_price') or 0):.2f}", style=WHITE),
                 Text(ct, style=DIM if b.get("_nofill") else WHITE),
                 Text(f"${b['_wager']:.2f}", style=WHITE),

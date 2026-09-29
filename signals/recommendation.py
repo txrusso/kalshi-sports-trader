@@ -129,8 +129,10 @@ def headline_for(ticker: str, side: str, yes_team: str, title: str,
 
     if is_total(ticker):
         y = (yes_team or "").lower()
+        # "goals scored" is NHL's unit (MLB runs / NFL+NBA points). Without it
+        # an NHL headline rendered "... Over 5.5 goals scored".
         line = y.replace("over", "").replace("runs scored", "").replace(
-            "points scored", "").strip()
+            "points scored", "").replace("goals scored", "").strip()
         if away_name and home_name:
             matchup = f"{away_name} vs {home_name}"
         else:

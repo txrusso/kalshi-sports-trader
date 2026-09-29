@@ -32,17 +32,33 @@ _TICKER_RE = re.compile(r"KXNHLGAME-(\d{2})([A-Z]{3})(\d{2})([A-Z]+)$")
 _MONTHS = {m: i for i, m in enumerate(
     ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"], start=1)}
 
-# UNCONFIRMED -- no live market available to check rules_primary phrasing
-# against (none open this far from the season, and settled markets from last
-# season have rolled off Kalshi's ~68-day settled-market window). Best-guess
-# built from Kalshi's own URL/category naming, which for NHL is "NHL Game"/
-# "NHL Goal Total" -- unlike MLB/NFL/NBA's "Professional X" pattern -- so this
-# anchors on "NHL game" rather than "Pro/professional Hockey game", with the
-# latter kept as a defensive fallback alternate. Getting this wrong is
-# low-risk (degrades to signals/recommendation.py's generic "<team> wins"
-# fallback, never a crash) but should be verified against a real market as
-# soon as one lists.
-_MATCHUP_RE = re.compile(r"the (.+?) vs (.+?) (?:NHL|Pro Hockey|professional hockey) game", re.IGNORECASE)
+# CONFIRMED LIVE 2026-09-29, once real markets listed for the season opener.
+# The "NHL game" anchor guessed here was right (Kalshi's own URL/category
+# naming, unlike MLB/NFL/NBA's "Professional X" pattern); "Pro/professional
+# Hockey game" is kept as a defensive alternate. Real text, both kinds:
+#   winner: "If San Jose wins the San Jose vs Dallas NHL game originally ..."
+#   totals: "If the teams collectively score more than 5.5 goals in the
+#            Edmonton vs Vancouver NHL game originally ..."
+#
+# That totals wording is why the team capture must refuse to span the word
+# "the". `re.search` matches at the LEFTMOST start, so a plain `the (.+?) vs`
+# anchored on "the teams collectively ..." and group(1) swallowed the whole
+# clause -- real headlines read "teams collectively score more than 5.5 goals
+# in the Florida vs Carolina Over 5.5" (seen live on the dashboard). Blocking
+# `the` inside the capture kills that start position, so the match falls
+# through to "the Edmonton vs Vancouver NHL game" and group(1) is the team.
+# No NHL/NFL/NBA club name contains the standalone word "the", so this only
+# ever narrows an over-capture. Display-only either way: the model's own
+# inputs come from the parsed TICKER (pt.away_abbr/pt.home_abbr), never from
+# this text, so a miss degrades to a generic headline and never a bad price.
+# NOTE: data/fair_value_nfl.py and data/fair_value_nba.py still use the
+# unhardened pattern. NFL is safe on its CONFIRMED live text ("If ATL Falcons
+# and NO Saints collectively score ..." has no earlier "the"); NBA's is still
+# unverified, and would break exactly like this if it uses NHL's wording.
+_TEAM = r"(?:(?!\bthe\b).)+?"
+_MATCHUP_RE = re.compile(
+    rf"the ({_TEAM}) vs ({_TEAM}) (?:NHL|Pro Hockey|professional hockey) game",
+    re.IGNORECASE)
 
 
 def matchup_from_rules(rules_primary: str) -> Optional[tuple[str, str]]:

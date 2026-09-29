@@ -32,6 +32,26 @@ class FakeClient:
         return [{"count_fp": str(filled)}] if filled else []
 
 
+class GoneClient(FakeClient):
+    """get_order 404s (order aged out); get_fills still answers."""
+
+    def __init__(self, fills):
+        super().__init__({k: ("?", v) for k, v in fills.items()})
+
+    def get_order(self, oid):
+        raise RuntimeError("HTTP 404 not_found")
+
+
+class DeadClient(GoneClient):
+    """Neither endpoint answers -- nothing can be concluded."""
+
+    def __init__(self):
+        super().__init__({})
+
+    def get_fills(self, limit=100, order_id=None):
+        raise RuntimeError("HTTP 500")
+
+
 def _live(oid, status="resting", contracts=1.71, price=0.43, ticker=None):
     return {"ticker": ticker or f"KXMLBGAME-{oid}-X", "side": "YES", "entry_price": price,
             "contracts": contracts, "wager_usd": round(price * contracts, 2),
@@ -133,6 +153,47 @@ class LoadRealBets(unittest.TestCase):
                 raise RuntimeError("429")
         with _Ledgers([], [_live("m")]), mock.patch.object(real_bets.log, "warning"):
             bets = load_real_bets(Broken())
+        self.assertEqual(len(bets), 1)
+        self.assertNotIn("_nofill", bets[0])
+
+
+class AgedOutOrder(unittest.TestCase):
+    """Kalshi 404s /portfolio/orders/{id} for orders only days old. That used to
+    abort the lookup, and "can't read" was graded as "assume it filled" -- which
+    silently resurrected never-filled bets into the record days after the fact.
+    Fills outlive the order record, so they decide it."""
+
+    def setUp(self):
+        _FILL_CACHE.clear()
+
+    def test_gone_order_with_no_fills_is_a_no_fill(self):
+        with _Ledgers([], [_live("gone")]):
+            bets = load_real_bets(client=GoneClient({"gone": 0.0}))
+        self.assertEqual(bets, [])
+
+    def test_gone_order_is_kept_and_marked_when_asked(self):
+        with _Ledgers([], [_live("gone")]):
+            bets = load_real_bets(client=GoneClient({"gone": 0.0}),
+                                  include_unfilled=True)
+        self.assertTrue(bets[0]["_nofill"])
+
+    def test_gone_order_that_did_fill_is_graded_on_its_fills(self):
+        with _Ledgers([], [_live("gone", contracts=2.0, price=0.5)]):
+            bets = load_real_bets(client=GoneClient({"gone": 2.0}))
+        self.assertEqual(bets[0]["contracts"], 2.0)
+        self.assertNotIn("_nofill", bets[0])
+
+    def test_gone_order_partial_fill_is_cut_to_what_filled(self):
+        with _Ledgers([], [_live("gone", contracts=2.0, price=0.5)]):
+            bets = load_real_bets(client=GoneClient({"gone": 0.8}))
+        self.assertEqual(bets[0]["contracts"], 0.8)
+        self.assertEqual(bets[0]["requested_contracts"], 2.0)
+
+    def test_unreadable_fills_still_grade_as_recorded(self):
+        """Only when the FILLS call fails too is the bet genuinely unverifiable;
+        it must stay in the report rather than vanish."""
+        with _Ledgers([], [_live("gone")]):
+            bets = load_real_bets(client=DeadClient())
         self.assertEqual(len(bets), 1)
         self.assertNotIn("_nofill", bets[0])
 

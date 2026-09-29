@@ -39,14 +39,41 @@ def _order_fill(order_id: str, client) -> Optional[tuple[str, float]]:
     """(status, filled contracts) for one order, or None if it can't be read."""
     if order_id in _FILL_CACHE:
         return _FILL_CACHE[order_id]
+
+    # Kalshi AGES ORDERS OUT of /portfolio/orders/{id} -- it 404s on orders
+    # only days old (5 of 29 checked on 2026-09-29, the oldest 7 days). That
+    # used to abort this whole lookup, and a None return means "grade it as
+    # recorded", i.e. ASSUME IT FILLED. So this regressed silently back into
+    # the exact bug the module exists to fix: the two never-filled CLE@BOS
+    # rows of 2026-09-22 that the original fix correctly dropped came back as
+    # a graded win and loss once their order records expired, along with three
+    # more from 09-25. Five phantom bets, $4.59 of wager that never happened,
+    # in the record and P&L of every report.
+    #
+    # Fills OUTLIVE the order record (verified: every still-readable order's
+    # fills came back, back to 09-18), so ask them separately and let them be
+    # the authority. An order Kalshi no longer serves cannot still be resting,
+    # so "unknown order + zero fills" is a real no-fill, not an unknown -- and
+    # it was confirmed independently for all five at the ACCOUNT level, where
+    # get_fills(ticker=...) returns nothing on those tickers either.
+    status = None
     try:
         status = (client.get_order(order_id) or {}).get("status") or "?"
+    except Exception:
+        log.info("Order %s is gone from /portfolio/orders (aged out); "
+                 "grading it from its fills instead.", order_id)
+    try:
         fills = client.get_fills(limit=100, order_id=order_id)
         filled = sum(float(f.get("count_fp") or f.get("count") or 0) for f in fills)
     except Exception:
+        # Only now is the bet genuinely unverifiable.
         log.warning("Fill lookup failed for order %s; grading it as recorded.",
                     order_id, exc_info=True)
         return None
+    if status is None:
+        # Derived, not reported. Both are terminal, so this caches and
+        # apply_fill() treats it exactly as a real terminal order.
+        status = "executed" if filled > 1e-9 else "canceled"
     if status in ("executed", "canceled"):
         _FILL_CACHE[order_id] = (status, filled)
     return status, filled

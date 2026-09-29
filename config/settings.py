@@ -94,8 +94,39 @@ class Settings:
     # "team wins by over K.5" rungs PER TEAM per game (unlike totals' one shared
     # ladder), so an event costs up to ~24 markets, worse than MLB totals' 8-10 --
     # see spread_min_mid/max_mid below, and the deep-scan-budget note above.
+    #
+    # MLB IS OFF FOR THE POSTSEASON (2026-09-29). PUT "KXMLBGAME", "KXMLBTOTAL"
+    # BACK WHEN THE 2027 REGULAR SEASON STARTS (late March 2027). This is a
+    # manual switch -- nothing re-enables it on its own.
+    #
+    # WHY, precisely: MLB Stats API's `leagueRecord` returns the SERIES record
+    # once the postseason starts, NOT the 162-game record. The winner model
+    # feeds it straight into log5 (data/fair_value.py), and log5(1.0, 0.0) is
+    # exactly 1.0. Measured live on real markets the day the Wild Card round
+    # began, one game into the series:
+    #     KXMLBGAME-26SEP301400PHIATL-ATL  fair prob 0.9072  conf 0.60
+    #         yes_win_pct=1.0 opp_win_pct=0.0 log5=0.9991 elo=0.5396
+    # Elo had it right at 0.54, but ELO_WEIGHT is 0.2 so it barely moves the
+    # blend. The market prices that game near a coin flip, so the model sees a
+    # ~35c edge, saturates edge_conf (which caps at 12c) and bets max stake --
+    # on a number carrying no information, in whichever direction the series
+    # happens to stand. Worse, the failure is CONFIDENT: the degenerate
+    # 1.0/0.0 case returns conf 0.60 while the harmless 0-0/0-0 case returns
+    # 0.35, so the more broken the input, the harder it bets.
+    #
+    # Totals are not degenerate but are not clean either: expected_runs() is
+    # built from gameType == "R" data only (data/mlb_stats.py), so it applies
+    # regular-season rates to a postseason run environment with elite bullpens
+    # and short-rest starters -- structurally the same mistake as the NFL
+    # preseason finding, and just as unvalidated. Off with the rest.
+    #
+    # NOT TOUCHED, deliberately: config/sports.py's SPORT_PREFIXES still carries
+    # the MLB entries. That registry grades and calibration-buckets bets that
+    # were ALREADY placed (two fired on 2026-09-29 before this landed), and it
+    # has nothing to do with what gets scanned. Removing MLB there would orphan
+    # every historical MLB row in the ledger.
     sport_series_prefixes: tuple[str, ...] = (
-        "KXMLBGAME", "KXMLBTOTAL", "KXNFLGAME", "KXNFLTOTAL", "KXNFLSPREAD",
+        "KXNFLGAME", "KXNFLTOTAL", "KXNFLSPREAD",
         "KXNBAGAME", "KXNBATOTAL", "KXNHLGAME", "KXNHLTOTAL",
     )
     include_totals: bool = True           # scan over/under (total runs) markets

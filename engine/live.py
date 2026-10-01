@@ -5,7 +5,9 @@ this submits a REAL order through Kalshi's API (engine.execution.submit_order)
 instead of just recording a paper bet, then notifies the user AFTER the order
 is placed — no confirmation step, no human in the loop.
 
-Enabled via `loop --live` (Settings.live_trade). Safety is whatever
+Enabled via `loop --live` (Settings.live_trade), minus any sport listed in
+Settings.live_trade_disabled_sports (NHL as of 2026-09-30) -- those are still
+scanned and recommended, but never submitted. Safety is whatever
 engine.execution.preview_order() enforces: per-order contract/cost caps, price
 range, market status, account balance. Nothing more — no daily loss cap, no
 cap on concurrent positions. That is a deliberate choice, made explicitly by
@@ -41,6 +43,8 @@ from pathlib import Path
 from typing import Optional
 
 from config.settings import OUTPUT_DIR, Settings
+from config.sports import sport_of
+from engine import bet_inputs
 from engine.execution import ExecutionDisabled, OrderRequest, submit_order
 from engine.maker import MakerManager
 from engine.paper import PaperLedger, iter_trigger_candidates
@@ -86,8 +90,22 @@ def run_live_trigger(recs: list[Recommendation], clients: dict, ledger: LiveLedg
     skipped WITHOUT recording to `ledger`, so it's reconsidered next cycle
     rather than being silently lost."""
     placed: list[dict] = []
+    disabled = {s.lower() for s in (settings.live_trade_disabled_sports or ())}
     for r, bet, _g in iter_trigger_candidates(recs, clients, ledger, window_minutes, now,
                                               settings):
+        # --- per-sport live-trading switch ---------------------------------
+        # Gated HERE rather than in iter_trigger_candidates so the sport keeps
+        # being scanned, recommended and snapshotted -- only the real order is
+        # refused. Covers the maker path below too, since both leave through
+        # this loop. Nothing is written to the ledger, so the sport simply has
+        # no live track record while it is off, rather than a fake one.
+        sport = sport_of(r.ticker)
+        if sport in disabled:
+            log.info("LIVE ORDER skipped: %s live trading is disabled "
+                     "(settings.live_trade_disabled_sports); %s %s not submitted.",
+                     sport.upper(), r.side, r.ticker)
+            continue
+
         # --- maker mode: rest on the book instead of crossing ---------------
         # Nothing is recorded to the ledger here. The order may fill partially,
         # later, or not at all, so the row is written by MakerManager's on_fill
@@ -104,6 +122,7 @@ def run_live_trigger(recs: list[Recommendation], clients: dict, ledger: LiveLedg
                 maker.place(ticker=r.ticker, side=r.side.lower(),
                             contracts=r.suggested_contracts, limit_cap=r.entry_price,
                             deadline=deadline, bet=bet, event_key=bet["event_key"])
+                bet_inputs.save(bet, r)          # for the dashboard's Model tab; never raises
                 continue
 
         coid = str(uuid.uuid5(_ORDER_NAMESPACE, bet["event_key"]))
@@ -128,6 +147,10 @@ def run_live_trigger(recs: list[Recommendation], clients: dict, ledger: LiveLedg
         bet["client_order_id"] = result.client_order_id
         ledger.record(bet)
         placed.append(bet)
+        # The inputs behind this bet, for the dashboard's Model tab while it is
+        # pending. After the ledger write on purpose, and save() never raises:
+        # a failure here can only cost the explanation, never the order.
+        bet_inputs.save(bet, r)
         log.info("LIVE ORDER placed (%.0f min before start): %s %s @ %.2f  order_id=%s status=%s",
                  bet["minutes_before"], r.side, bet["label"], r.entry_price,
                  result.order_id, result.status)

@@ -129,6 +129,25 @@ class Settings:
         "KXNFLGAME", "KXNFLTOTAL", "KXNFLSPREAD",
         "KXNBAGAME", "KXNBATOTAL", "KXNHLGAME", "KXNHLTOTAL",
     )
+    # Sports barred from placing REAL orders. They are still scanned, still
+    # produce recommendations, and still show on the dashboard -- only
+    # engine/live.py::run_live_trigger refuses them, so the snapshot history
+    # they generate keeps accumulating toward the validation they need. This
+    # is deliberately NOT sport_series_prefixes (the MLB-postseason switch
+    # above), which stops scanning outright and so stops collecting data.
+    #
+    # NHL, 2026-09-30, at the user's direction after day one went 1-4 on
+    # totals. The recalibration shipped the same day (see CLAUDE.md's "NHL
+    # TOTALS RECALIBRATED") fixed two real defects and stopped 6 of 7 totals
+    # bets from firing, but it is a CALIBRATION result with no ROI validation
+    # behind it -- no settled KXNHLTOTAL market has ever been graded -- and
+    # the measured per-game signal is corr 0.03, which is not a basis for
+    # betting real money against a market that can see goaltending and we
+    # cannot. NFL stays live, explicitly.
+    #
+    # Scope: this gates the automatic loop only. `cli.py place --confirm`
+    # is a deliberate human action and is intentionally still allowed.
+    live_trade_disabled_sports: tuple[str, ...] = ("nhl",)
     include_totals: bool = True           # scan over/under (total runs) markets
     totals_min_mid: float = 0.12          # only consider near-the-money O/U lines
     totals_max_mid: float = 0.88          #   (skip deep ITM/OTM ladder rungs)

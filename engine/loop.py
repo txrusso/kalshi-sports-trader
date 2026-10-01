@@ -9,6 +9,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 
 from config.settings import EASTERN, Settings, DEFAULTS
+from config.sports import sport_of
 from data.fair_value import FairValueModel, FairValueRouter
 from data.fair_value_nfl import NflFairValueModel
 from data.fair_value_nfl_totals import NflTotalsFairValueModel
@@ -27,7 +28,7 @@ from engine.notify import (SmsNotifier, PushNotifier, format_bet_sms, format_bet
                           format_order_placed_sms, format_order_placed_push)
 from engine.live import LiveLedger, run_live_trigger
 from engine.maker import MakerManager
-from engine.paper import PaperLedger, run_paper_trigger
+from engine.paper import PaperLedger, ShadowLedger, run_paper_trigger
 from engine.scanner import run_scan
 from engine.snapshot import SnapshotStore
 from kalshi.client import KalshiClient
@@ -171,10 +172,27 @@ def run_once(settings: Settings = DEFAULTS, ctx=None) -> list:
 
     # Live trigger: submit REAL orders through the Kalshi API. No confirmation
     # step -- see engine/live.py for exactly what is and isn't guarded.
+    # Sports barred from real money are split off here and SHADOW-traded
+    # instead (recorded to output/shadow_ledger.jsonl, no order, no money), so
+    # they keep building a forward track record while they are off. The split
+    # is by recommendation rather than inside run_live_trigger so each path
+    # dedups against its own ledger -- a shadow bet must not make the live
+    # ledger think that event was already bet, or vice versa. engine/live.py
+    # ALSO refuses a barred sport on its own; that is defence in depth on the
+    # real-money path, not redundancy to remove.
+    live_recs, shadow_recs = result.recommendations, []
+    if settings.live_trade:
+        barred = {s.lower() for s in (settings.live_trade_disabled_sports or ())}
+        if barred:
+            live_recs = [r for r in result.recommendations
+                         if sport_of(r.ticker) not in barred]
+            shadow_recs = [r for r in result.recommendations
+                           if sport_of(r.ticker) in barred]
+
     if settings.live_trade:
         live_ledger = LiveLedger()
         maker = get_maker_manager(client, settings) if settings.maker_mode else None
-        live_placed = run_live_trigger(result.recommendations, sport_clients,
+        live_placed = run_live_trigger(live_recs, sport_clients,
                                        live_ledger, client, settings, window,
                                        maker=maker)
         if maker is not None:
@@ -206,6 +224,23 @@ def run_once(settings: Settings = DEFAULTS, ctx=None) -> list:
                 except Exception:
                     log.exception("Text alert crashed for live order %r (order still placed).",
                                  b.get("label"))
+
+    # Shadow trigger: a barred sport's bets, simulated only. Skipped when
+    # --paper is also on, since that path already records every sport (and
+    # would otherwise be deduped against a different file).
+    if shadow_recs and not settings.paper_trade:
+        try:
+            shadow_placed = run_paper_trigger(shadow_recs, sport_clients, ShadowLedger(),
+                                              window, settings=settings)
+            if shadow_placed:
+                print(f"\n>> SHADOW {len(shadow_placed)} simulated bet(s) "
+                      f"(NO money; output/shadow_ledger.jsonl):")
+                for b in shadow_placed:
+                    print(f"   {b['side']:>3} {b['label']:<22} @ {b['entry_price']:.2f}")
+        except Exception:
+            # Bookkeeping for a sport we are deliberately not trading must never
+            # be able to take down a cycle that moves real money on another one.
+            log.exception("Shadow trigger failed; live trading is unaffected.")
 
     # Paper-trade trigger: bet each game on the last cycle before its first pitch.
     if settings.paper_trade:

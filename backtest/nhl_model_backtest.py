@@ -155,10 +155,20 @@ def run_validation(nhl_data: NhlDataClient, season: int) -> None:
     print(f"\n=== TOTALS (expected goals, no real Kalshi line to test P(over) against yet) ===")
     for k, v in totals_report(totals_rows).items():
         print(f"  {k:42}: {v}")
-    print("\n  Guide: rmse < naive_rmse means the model beats guessing the league average;\n"
-          "  compare 'implied_phi' above to NHL_TOTALS_PHI in data/fair_value_nhl_totals.py\n"
-          "  (currently seeded from a raw 4-season in-sample measurement, not yet\n"
-          "  validated out-of-sample the way this number is).")
+    print("
+  Guide: rmse < naive_rmse means the model beats guessing the league average.
+"
+          "  NOTE (2026-09-30): it does NOT, and has not in any season measured -- the
+"
+          "  per-game team-strength signal in NHL totals is near zero (see
+"
+          "  data/scoring_environment_nhl.py::TEAM_SIGNAL_SHRINK). 'implied_phi' above is
+"
+          "  a negative-binomial fit and no longer describes the shipped distribution,
+"
+          "  which models hockey's tie-breaking overtime goal explicitly
+"
+          "  (data/distributions.py::overtime_total_survival, NHL_TOTALS_DISPERSION).")
 
 
 def run_sweep(nhl_data: NhlDataClient, season: int, param: str, values: list[str]) -> None:

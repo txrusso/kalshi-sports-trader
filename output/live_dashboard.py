@@ -124,6 +124,7 @@ class AccountData:
     yesterday_by_sport: list[tuple[str, tuple[int, int, float]]] = field(default_factory=list)
     yesterday_risk: Optional[TodayRisk] = None
     resting: Optional[RestingOrders] = None                # unfilled orders on the book
+    bet_inputs: dict[str, dict] = field(default_factory=dict)  # event_key -> inputs at placement
     error: str = ""
 
 
@@ -265,9 +266,11 @@ def probe_loop() -> LoopInfo:
 
 LOOP_LOG = ROOT / "logs" / "paper_loop.log"
 ALERT_LOG = ROOT / "logs" / "notifications.jsonl"
-TASK_NAMES = ("KalshiPaperLoop", "KalshiLoopStop", "KalshiSettle", "KalshiSnapshotCompress")
+TASK_NAMES = ("KalshiPaperLoop", "KalshiLoopStop", "KalshiSettle", "KalshiSnapshotCompress",
+              "KalshiDashboardServe")
 TASK_LABELS = {"KalshiPaperLoop": "start", "KalshiLoopStop": "stop",
-               "KalshiSettle": "settle", "KalshiSnapshotCompress": "compress"}
+               "KalshiSettle": "settle", "KalshiSnapshotCompress": "compress",
+               "KalshiDashboardServe": "phone"}
 
 
 @dataclass
@@ -443,6 +446,8 @@ def load_account() -> AccountData:
         # BET column must see the unfilled rows too.
         data.placed = placed_events(all_bets)
         data.settled = settled_bets(all_bets, outcomes)
+        from engine import bet_inputs as _bet_inputs
+        data.bet_inputs = _bet_inputs.load()      # read-only here; the loop writes it
         data.curves = profit_curves(bets, outcomes)
         data.graded = graded_rows(bets, outcomes)
         data.totals = tally(data.graded)
@@ -747,6 +752,12 @@ def bet_eta(rec: dict, start: Optional[datetime], now: datetime,
     for ledger in ledgers:
         if event_key in ledger:
             return "placed", ledger[event_key]
+    # A sport switched off for live trading will never fire while the loop is
+    # in LIVE mode, so don't project a bet time for it (NHL as of 2026-09-30;
+    # config/settings.py::live_trade_disabled_sports).
+    if "LIVE" in mode and sport_of(rec.get("ticker") or "") in {
+            x.lower() for x in (settings.live_trade_disabled_sports or ())}:
+        return "none", None
     if float(rec.get("suggested_contracts") or 0) <= 0 or start is None:
         return "none", None
     window = timedelta(minutes=interval / 60.0 + settings.paper_trigger_buffer_min)
@@ -1179,9 +1190,13 @@ def _check(ok: Optional[bool], what: str) -> Text:
             Text(f"REBUILD MISMATCH -- the explanation may be out of date", style=RED))
 
 
-def model_left(ex: Explanation) -> Group:
+def model_left(ex: Explanation, banner: Optional[Text] = None) -> Group:
     """Section B (what drove this number), then A (what the model is) at the bottom."""
-    head = Text(ex.headline, style="bold " + WHITE)
+    head = Text()
+    if banner is not None:
+        head.append_text(banner)
+        head.append("\n")
+    head.append(ex.headline, style="bold " + WHITE)
     head.append(f"\n{ex.ticker}", style=CYAN)
     head.append(f"   {bet_on(ex.ticker, ex.side)} @ {ex.price:.2f}", style="bold " + WHITE)
     head.append(f"  (Kalshi {ex.side})", style=DIM)
@@ -1417,6 +1432,9 @@ class DashboardApp(App):
         self._health = HealthData()
         self._selected: Optional[str] = None     # ticker the Model tab explains
         self._show_yesterday = False             # TODAY card toggled to YESTERDAY
+        # When set, the Model tab explains this PLACED bet (event_key) instead of
+        # the Signals row -- whichever table the user last moved in wins.
+        self._model_bet: Optional[str] = None
         self._account_busy = False
         self._last_mtime: float = -1.0
         # NFL/NHL real start times, by ticker. Filled off the UI thread; until a
@@ -1468,6 +1486,8 @@ class DashboardApp(App):
             "PENDING — placed bets awaiting settlement")
         self.query_one("#signals", DataTable).border_title = (
             "SIGNALS — this cycle's recommendations")
+        # Arrow keys drive SIGNALS (and so the Model tab) until the user clicks elsewhere.
+        self.query_one("#signals", DataTable).focus()
         self.reload_scan(force=True)
         self.refresh_account()
         self.refresh_loop_info()
@@ -1662,7 +1682,9 @@ class DashboardApp(App):
                 t.append(" · FAILED: " + ", ".join(TASK_LABELS.get(x.name, x.name) for x in bad),
                          style=RED)
             else:
-                upcoming = [x for x in h.tasks if x.next_run and x.name != "KalshiPaperLoop"]
+                # Long-running tasks (the loop, the phone server) aren't "next up".
+                upcoming = [x for x in h.tasks if x.next_run and x.name not in
+                            ("KalshiPaperLoop", "KalshiDashboardServe")]
                 if upcoming:
                     nxt = min(upcoming, key=lambda x: x.next_run)
                     t.append(f" · next {TASK_LABELS.get(nxt.name, nxt.name)} "
@@ -1828,8 +1850,13 @@ class DashboardApp(App):
                 Text(book_label(b.get("_src", "")),
                      style=CYAN if b.get("_src") == "live" else DIM),
                 Text(truncate(b.get("order_status") or "-", 8), style=DIM),
-                height=2,
+                height=2, key=f"bet:{b.get('event_key')}",
             )
+        if self._model_bet:
+            try:
+                table.move_cursor(row=table.get_row_index(f"bet:{self._model_bet}"))
+            except Exception:
+                pass
 
     def _set_tab_label(self, pane_id: str, label: str) -> None:
         try:
@@ -1891,22 +1918,57 @@ class DashboardApp(App):
             self.action_toggle_day()
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
-        """Moving the cursor in SIGNALS re-targets the Model tab."""
-        if event.data_table.id != "signals" or event.row_key is None:
+        """Moving the cursor in SIGNALS or PENDING re-targets the Model tab.
+
+        Only when that table has focus: a table re-rendering after a refresh
+        also fires this event, and must not steal the Model tab away from the
+        table the user is actually looking at."""
+        if event.data_table.has_focus:
+            self._follow_row(event.data_table, event.row_key)
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        # Clicking (or Enter on) the row that is ALREADY highlighted fires no
+        # RowHighlighted, so follow it here too.
+        self._follow_row(event.data_table, event.row_key)
+
+    def on_descendant_focus(self, event) -> None:
+        # Tabbing / clicking into SIGNALS or PENDING points the Model tab at the
+        # row under that table's cursor, even if the cursor never moves.
+        table = event.widget
+        if isinstance(table, DataTable) and table.id in ("signals", "pending") and table.row_count:
+            try:
+                key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
+            except Exception:
+                return
+            self._follow_row(table, key)
+
+    def _follow_row(self, table: DataTable, row_key) -> None:
+        if row_key is None:
             return
-        key = event.row_key.value
-        if not key or key.startswith("__hdr_") or key == self._selected:
-            return
-        self._selected = key
-        self.render_model()
+        key = row_key.value or ""
+        if table.id == "signals":
+            if key.startswith("__hdr_"):
+                return
+            if key == self._selected and self._model_bet is None:
+                return
+            self._selected, self._model_bet = key, None
+            self.render_model()
+        elif table.id == "pending" and key.startswith("bet:"):
+            event_key = key[len("bet:"):]
+            if event_key != self._model_bet:
+                self._model_bet = event_key
+                self.render_model()
 
     def render_model(self) -> None:
+        if self._model_bet is not None:
+            self._render_model_bet(self._model_bet)
+            return
         recs = self._scan.recs if self._scan else []
         rec = next((r for r in recs if r.get("ticker") == self._selected), None)
         left = self.query_one("#model_left", Static)
         right = self.query_one("#model_right", Static)
         if rec is None:
-            left.update(Text("Select a row in SIGNALS to explain it.", style=DIM))
+            left.update(Text("Select a row in SIGNALS or PENDING to explain it.", style=DIM))
             right.update("")
             return
         try:
@@ -1916,6 +1978,37 @@ class DashboardApp(App):
         except Exception as e:                                   # never kill the UI
             left.update(Text(f"could not explain {self._selected}: "
                              f"{type(e).__name__}: {e}", style=RED))
+            right.update("")
+
+    def _render_model_bet(self, event_key: str) -> None:
+        """Explain a PLACED bet from the inputs saved when it was placed."""
+        left = self.query_one("#model_left", Static)
+        right = self.query_one("#model_right", Static)
+        bet = next((b for b in self._account.pending if b.get("event_key") == event_key), {})
+        entry = self._account.bet_inputs.get(event_key)
+        if not entry or not isinstance(entry.get("rec"), dict):
+            msg = Text(bet_label(bet) if bet else event_key, style="bold " + WHITE)
+            msg.append(f"\n{bet.get('ticker', '')}", style=CYAN)
+            msg.append("\n\nNo saved model inputs for this bet.", style=YELLOW)
+            msg.append("\nThe loop saves them when it places a bet, starting with its "
+                       "first run after this feature shipped (2026-09-24, 10:00). Bets "
+                       "placed before that, and bets that have settled, have none.", style=DIM)
+            left.update(msg)
+            right.update("")
+            return
+        banner = Text(" PLACED BET ", style="bold #0d1117 on #e3b341")
+        placed = parse_utc(entry.get("placed_ts"))
+        when = (f"{placed.astimezone(EASTERN):%a %b %d, %I:%M %p ET}".replace(" 0", " ")
+                if placed else "placement")
+        banner.append(f"  inputs as of {when} -- what Stakey saw when it bet, "
+                      f"not the market now", style=YELLOW)
+        try:
+            ex = explain(entry["rec"])
+            left.update(model_left(ex, banner))
+            right.update(model_right(ex, segment_rows(self._account.graded)))
+        except Exception as e:                                   # never kill the UI
+            left.update(Text(f"could not explain {event_key}: {type(e).__name__}: {e}",
+                             style=RED))
             right.update("")
 
     def render_rec_table(self) -> None:

@@ -104,6 +104,27 @@ class FairValueRebuild(unittest.TestCase):
         # 0.35 + 153.2/800 = 0.5415, which rounds either way depending on float representation
         self.assertAlmostEqual(ex.fv_conf, 0.35 + min(153.2 / 800, 0.25), delta=0.0006)
 
+    def test_nhl_totals_rebuilds_with_the_overtime_distribution(self):
+        from data.distributions import overtime_total_survival
+        from data.fair_value_nhl_totals import NHL_TOTALS_DISPERSION
+        ea, eh = 2.84, 3.35
+        fair = round(overtime_total_survival(5, ea, eh, NHL_TOTALS_DISPERSION), 4)
+        fv = {"line": 5.5, "exp_total": round(ea + eh, 2), "e_away": ea, "e_home": eh,
+              "raw_exp_total": 7.10}
+        ex = explain(rec("KXNHLTOTAL-26SEP29VANEDM-6", "pregame_nhl_totals", fv, fair))
+        self.assertTrue(ex.repro_ok, f"{ex.fair_yes} vs {ex.repro_yes}")
+        self.assertTrue(any("overtime-adjusted" in a for a, _ in ex.fair_steps))
+        self.assertTrue(any("shrunk toward league avg" in a for a, _ in ex.fair_steps))
+
+    def test_stale_nhl_totals_row_is_flagged_not_reported_as_a_mismatch(self):
+        # Rows written before the 2026-09-30 recalibration have no per-side
+        # expected goals; the explainer must not claim they disagree.
+        fv = {"line": 5.5, "exp_total": 6.97}
+        ex = explain(rec("KXNHLTOTAL-26SEP29MTLTOR-6", "pregame_nhl_totals", fv, 0.6951))
+        self.assertIsNone(ex.repro_yes)
+        self.assertIsNone(ex.repro_ok)
+        self.assertTrue(any("2026-09-30" in n for n in ex.notes))
+
     def test_every_live_recommendation_rebuilds(self):
         if not LATEST.exists():
             self.skipTest("no scan file")

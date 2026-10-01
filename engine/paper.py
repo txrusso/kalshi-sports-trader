@@ -218,6 +218,25 @@ def iter_trigger_candidates(recs: list[Recommendation], clients: dict, ledger: P
                   len(skewed), len(recs))
 
 
+class ShadowLedger(PaperLedger):
+    """Simulated bets for a sport that is scanned and recommended but barred
+    from real money (config/settings.py::live_trade_disabled_sports -- NHL as
+    of 2026-09-30).
+
+    A SEPARATE FILE, and that is the whole point. output/paper_ledger.jsonl is
+    NOT paper money -- those rows are real orders the user placed by hand from
+    the alert, and engine/real_bets.py::load_real_bets counts them as real in
+    `cli.py settle`, the nightly text, ledger_stats and both dashboards.
+    Writing simulated bets there would inflate the real record and P&L with
+    money that was never at risk -- the same class of defect as the phantom
+    never-filled rows that fix was written to remove. Nothing reads this file
+    into a money report; it exists so a barred sport still accumulates the
+    forward track record it needs to earn its way back to real money."""
+
+    def __init__(self, path: Optional[Path] = None):
+        super().__init__(path or (OUTPUT_DIR / "shadow_ledger.jsonl"))
+
+
 def run_paper_trigger(recs: list[Recommendation], clients: dict, ledger: PaperLedger,
                       window_minutes: float, now: Optional[datetime] = None,
                       settings: Settings = DEFAULTS) -> list[dict]:
@@ -228,6 +247,8 @@ def run_paper_trigger(recs: list[Recommendation], clients: dict, ledger: PaperLe
                                               settings):
         ledger.record(bet)
         placed.append(bet)
+        from engine import bet_inputs
+        bet_inputs.save(bet, r)              # dashboard Model tab; never raises
         log.info("PAPER BET (%.0f min before): %s %s @ %.2f  edge %s  conf %.2f",
                  bet["minutes_before"], r.side, bet["label"], r.entry_price, r.edge_cents, r.confidence)
     return placed

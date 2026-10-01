@@ -289,14 +289,33 @@ def _explain_fair(ex: Explanation, fv: dict, settings: Settings) -> None:
             return
         phi, bumps = _totals_params(src)
         bump = bumps.get(line, 0.0)
+        # NHL uses its own tie-breaking-goal distribution, not a negative
+        # binomial (data/distributions.py::overtime_total_survival). It needs
+        # the per-side expected goals, which the model saves alongside the
+        # total; rows written before that shipped fall back to an even split.
+        nhl = src == "pregame_nhl_totals"
+        if nhl:
+            from data.distributions import overtime_total_survival
+            ea, eh = fv.get("e_away"), fv.get("e_home")
 
-        def p_over(l, b=bump):
-            return min(1.0, nb_survival(int(line), l, phi) + b)
+            def p_over(l, b=bump):
+                a, h = (ea, eh) if ea is not None and eh is not None else (l / 2.0, l / 2.0)
+                scale = l / (a + h) if (a + h) > 0 else 1.0
+                return min(1.0, overtime_total_survival(int(line), a * scale, h * scale,
+                                                        phi) + b)
+        else:
+            def p_over(l, b=bump):
+                return min(1.0, nb_survival(int(line), l, phi) + b)
 
         unit = {"MLB": "runs", "NFL": "pts", "NBA": "pts", "NHL": "goals"}.get(ex.sport, "")
+        shape = (f"P(total > line), overtime-adjusted, dispersion={phi}" if nhl
+                 else f"P(total > line), neg. binomial phi={phi}")
         ex.fair_steps = [("expected total", f"{lam:.2f} {unit}"),
                          ("line", f"{line}"),
-                         (f"P(total > line), neg. binomial phi={phi}", "")]
+                         (shape, "")]
+        if nhl and fv.get("raw_exp_total") is not None and fv["raw_exp_total"] != lam:
+            ex.fair_steps.insert(1, ("  team-strength signal shrunk toward league avg",
+                                     f"raw {fv['raw_exp_total']:.2f} -> {lam:.2f} {unit}"))
         pf, rf = fv.get("park_factor"), fv.get("roof_factor")
         if pf:
             ex.fair_steps.insert(1, ("  incl. park factor", f"x{pf:.2f}"))
@@ -307,7 +326,17 @@ def _explain_fair(ex: Explanation, fv: dict, settings: Settings) -> None:
                                      f"(RA9 home {fv.get('home_eff_ra9')}, away {fv.get('away_eff_ra9')})"))
         if bump:
             ex.fair_steps.append(("key-number bump", f"+{bump:.1%}"))
-        ex.repro_yes = p_over(lam)
+        # An NHL row saved before the 2026-09-30 recalibration carries no
+        # per-side expected goals, so it cannot be rebuilt -- say so rather
+        # than rebuild it with a guessed split and report a false mismatch.
+        stale_nhl = nhl and (fv.get("e_away") is None or fv.get("e_home") is None)
+        if stale_nhl:
+            ex.notes.append("This recommendation was produced before the 2026-09-30 NHL "
+                            "totals recalibration and does not carry the per-side expected "
+                            "goals the current model needs, so it cannot be rebuilt exactly. "
+                            "The probabilities below assume an even home/away split.")
+        else:
+            ex.repro_yes = p_over(lam)
         if src == "pregame_totals":
             ex.fv_conf = round(0.40 + 0.05 * int(fv.get("starters_known") or 0), 3)
         else:
@@ -338,8 +367,8 @@ def _totals_params(src: str) -> tuple[float, dict]:
         from data.fair_value_nba_totals import NBA_TOTALS_PHI
         return NBA_TOTALS_PHI, {}
     if src == "pregame_nhl_totals":
-        from data.fair_value_nhl_totals import NHL_TOTALS_PHI
-        return NHL_TOTALS_PHI, {}
+        from data.fair_value_nhl_totals import NHL_TOTALS_DISPERSION
+        return NHL_TOTALS_DISPERSION, {}
     return 1.0, {}
 
 

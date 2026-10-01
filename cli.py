@@ -452,6 +452,16 @@ def cmd_settle(args) -> None:
         print("No bets in either ledger yet.")
         return
     outcomes = resolve_outcomes({b["ticker"] for b in bets}, build_clients())
+    # Drop the saved model inputs (engine/bet_inputs.py) of bets that have now
+    # settled -- they only exist to explain PENDING bets. Housekeeping: can
+    # never stop the report.
+    try:
+        from engine import bet_inputs
+        removed = bet_inputs.prune_settled(build_clients())
+        if removed:
+            print(f"(cleared saved model inputs for {removed} settled bet(s))")
+    except Exception:
+        pass
     settled = [b for b in bets if b["ticker"] in outcomes]
     pending = [b for b in bets if b["ticker"] not in outcomes]
 

@@ -294,6 +294,12 @@ def _explain_fair(ex: Explanation, fv: dict, settings: Settings) -> None:
         # the per-side expected goals, which the model saves alongside the
         # total; rows written before that shipped fall back to an even split.
         nhl = src == "pregame_nhl_totals"
+        if nhl and fv.get("dispersion") is not None:
+            # Price it back with the calibration THIS rec used. The nightly
+            # re-sweep can move the live value, and rebuilding an older bet
+            # with tonight's number would report a MISMATCH that never
+            # happened.
+            phi = float(fv["dispersion"])
         if nhl:
             from data.distributions import overtime_total_survival
             ea, eh = fv.get("e_away"), fv.get("e_home")
@@ -367,8 +373,8 @@ def _totals_params(src: str) -> tuple[float, dict]:
         from data.fair_value_nba_totals import NBA_TOTALS_PHI
         return NBA_TOTALS_PHI, {}
     if src == "pregame_nhl_totals":
-        from data.fair_value_nhl_totals import NHL_TOTALS_DISPERSION
-        return NHL_TOTALS_DISPERSION, {}
+        from config import nhl_calibration
+        return nhl_calibration.dispersion(), {}
     return 1.0, {}
 
 

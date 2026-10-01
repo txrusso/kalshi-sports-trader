@@ -236,6 +236,19 @@ class ShadowLedger(PaperLedger):
     def __init__(self, path: Optional[Path] = None):
         super().__init__(path or (OUTPUT_DIR / "shadow_ledger.jsonl"))
 
+    def record(self, bet: dict) -> None:
+        """Stamp the model version that priced this bet. The nightly re-sweep
+        (backtest/nhl_recalibrate.py) can change the model under us, and a
+        track record of a moving target is worth little -- this keeps the
+        ledger segmentable by exactly the model that produced each row."""
+        try:
+            from config import nhl_calibration
+            if sport_of(bet.get("ticker", "")) == "nhl":
+                bet = {**bet, "model_version": nhl_calibration.version()}
+        except Exception:          # stamping must never cost us the row
+            log.exception("Could not stamp model_version on a shadow bet.")
+        super().record(bet)
+
 
 def run_paper_trigger(recs: list[Recommendation], clients: dict, ledger: PaperLedger,
                       window_minutes: float, now: Optional[datetime] = None,

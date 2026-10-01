@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
+from config import nhl_calibration
 from config.settings import Settings, DEFAULTS
 from data.distributions import overtime_total_survival
 from data.fair_value import FairValue
@@ -131,8 +132,9 @@ class NhlTotalsFairValueModel:
             return FairValue(None, "none", 0.0, {"reason": "missing team scoring rates"},
                              game_state=game_state)
         lam = et["lam"]
-        prob_over = overtime_total_survival(int(pt.line), et["e_away"], et["e_home"],
-                                            NHL_TOTALS_DISPERSION)
+        # Nightly re-sweep may override; falls back to NHL_TOTALS_DISPERSION.
+        disp = nhl_calibration.dispersion()
+        prob_over = overtime_total_survival(int(pt.line), et["e_away"], et["e_home"], disp)
 
         away_name, home_name = pt.away_abbr, pt.home_abbr
         matchup = matchup_from_rules(quote.rules_primary) if quote else None
@@ -143,6 +145,10 @@ class NhlTotalsFairValueModel:
                          {"line": pt.line, "exp_total": round(lam, 2),
                           "e_away": round(et["e_away"], 4), "e_home": round(et["e_home"], 4),
                           "raw_exp_total": round(et.get("raw_lam", lam), 2),
+                          # Saved per rec so the dashboard's Model tab rebuilds a bet
+                          # with the calibration IT was priced under, not tonight's.
+                          "dispersion": disp, "shrink": et.get("shrink"),
+                          "calibration_version": nhl_calibration.version(),
                           "matchup": f"{pt.away_abbr}@{pt.home_abbr}",
                           "away_name": away_name, "home_name": home_name},
                          game_state=game_state)

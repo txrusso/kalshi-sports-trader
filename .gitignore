@@ -35,3 +35,6 @@ backtest/in_game_wp_cache.json
 # Local scratch notes and editor/assistant config
 CLAUDE.md
 .claude/
+
+# Nightly NHL recalibration reports (generated)
+backtest/nhl_recalibrate_*.txt

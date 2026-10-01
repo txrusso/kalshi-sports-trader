@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+from config import nhl_calibration
 from data.nhl_data import NhlDataClient, NhlGame, season_for_date
 
 # Mirrors data/scoring_environment_nba.py's identical constant -- NHL's
@@ -104,8 +105,8 @@ class ScoringEnvironmentModel:
             ) if rates else DEFAULT_LEAGUE_TOTAL
         return self._league_avg_cache[as_of_date]
 
-    def expected_goals(self, away_abbr: str, home_abbr: str,
-                       as_of_date: str) -> Optional[dict]:
+    def expected_goals(self, away_abbr: str, home_abbr: str, as_of_date: str,
+                       shrink: Optional[float] = None) -> Optional[dict]:
         """Expected goals for both teams (offense x opponent's allowed rate,
         vs league average). Mirrors
         data/scoring_environment_nba.py::ScoringEnvironmentModel.expected_points()."""
@@ -123,9 +124,15 @@ class ScoringEnvironmentModel:
         # TEAM_SIGNAL_SHRINK). Both sides are scaled by the same factor so the
         # away/home split -- which drives the tie probability in
         # data/distributions.py::overtime_total_survival -- is preserved.
-        lam = lg_total + TEAM_SIGNAL_SHRINK * (raw_lam - lg_total)
+        # `shrink` is an explicit override so backtest/nhl_recalibrate.py can
+        # SWEEP this value -- it cannot do that by setting the module constant,
+        # because production reads the live calibration store instead. Left
+        # None (always, in production) it uses that store, which itself falls
+        # back to TEAM_SIGNAL_SHRINK above when no validated override exists.
+        k = nhl_calibration.shrink() if shrink is None else float(shrink)
+        lam = lg_total + k * (raw_lam - lg_total)
         if raw_lam > 0:
             scale = lam / raw_lam
             e_away, e_home = e_away * scale, e_home * scale
         return {"lam": lam, "e_away": e_away, "e_home": e_home,
-                "raw_lam": raw_lam, "lg_total": lg_total}
+                "raw_lam": raw_lam, "lg_total": lg_total, "shrink": k}

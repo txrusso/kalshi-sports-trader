@@ -539,6 +539,28 @@ def cmd_settle(args) -> None:
             print(f"   {b['label']:<34} @ {b['entry_price']:.2f}  "
                   f"(first pitch {fp_et:%Y-%m-%d %I:%M %p} ET)")
 
+    # NHL's SIMULATED record, appended to both the printed report and the
+    # text. Marked SIM and kept strictly out of the totals above: NHL is
+    # shadow-traded (config/settings.py::live_trade_disabled_sports) and none
+    # of this is real money -- see engine/paper.py::ShadowLedger.
+    shadow_line = ""
+    try:
+        from backtest.nhl_recalibrate import grade_shadow_ledger, shadow_summary_line
+        sh = grade_shadow_ledger()
+        shadow_line = shadow_summary_line()
+        if sh.get("n"):
+            print("\nNHL SHADOW (SIMULATED -- no money, excluded from everything above):")
+            if sh.get("settled"):
+                print(f"   {sh['w']}-{sh['l']}   net ${sh['pnl']:+.2f} on ${sh['wagered']:.2f}"
+                      f"   ROI {sh['roi']:+.1%}")
+                print(f"   by model version: {sh.get('by_version')}")
+            print(f"   {sh['n']} simulated bet(s) recorded, {sh.get('settled', 0)} settled")
+    except Exception:
+        # A simulated sideshow must never break the real nightly report.
+        log.exception("NHL shadow summary failed; the real settle report is unaffected.")
+    if shadow_line:
+        summary = f"{summary} {shadow_line}"
+
     if getattr(args, "notify", False):
         from engine.notify import SmsNotifier, flush
         queued = SmsNotifier().send(summary)

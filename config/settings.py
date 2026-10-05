@@ -340,7 +340,36 @@ class Settings:
     # old ~8-9-rec regime. Back to the walk-forward-validated 0.06 rather than the
     # unvalidated 0.10, restoring the original per-bet safety margin under the new,
     # much wider scan/rec footprint.
-    max_stake_pct: float = 0.06          # cap suggested stake at 6% of bankroll
+    #
+    # Raised 0.06 -> 0.08 on 2026-10-05, at the user's request. UNLIKE the 2026-08-31
+    # (0.25) and 2026-09-18 (0.10) bumps, this one WAS swept first -- and the sweep
+    # argues against it, so it ships as an explicit risk-appetite choice rather than a
+    # tuned value. `bankroll_sim --sweep max_stake_pct 0.045..0.10` on the current
+    # cache (n=212 train / 349 validate) degrades MONOTONICALLY as the cap rises:
+    #     cap     TRAIN roi / maxDD        VALID roi / maxDD
+    #     0.06    -0.0183 / 39.36%         +0.0502 / 43.85%
+    #     0.07    -0.0240 / 41.15%         +0.0487 / 44.06%
+    #     0.08    -0.0274 / 42.00%         +0.0481 / 44.06%
+    #     0.10    -0.0302 / 42.03%         +0.0481 / 44.06%
+    # i.e. 0.08 loses on BOTH splits and on drawdown -- the exact both-splits bar every
+    # other constant here had to clear. Bet count is unchanged (the cap sizes bets, it
+    # does not select them), and validate flatlines at 0.08+, so ~0.08 is about where
+    # the cap stops binding in this sample.
+    #
+    # Three honest caveats that cut the other way, and are why this is defensible as a
+    # judgement call rather than simply wrong: (1) the cache spans Jun 22 - Sep 5 and is
+    # MLB-heavy, but MLB is currently OFF and the live book is NFL, so the sample is not
+    # today's regime; (2) it was built under the OLD integer-floor sizer -- fractional
+    # sizing shipped 2026-09-17 and this sweep has still never been re-run under it;
+    # (3) on a ~$20 bankroll the difference is $1.20 -> $1.60 of maximum exposure per
+    # bet, so the absolute risk added is small in dollars even where the ratio looks bad.
+    #
+    # What has NOT changed and still applies: there is no daily loss cap and no
+    # max-concurrent-positions limit, and the scan footprint is the wide one (36+
+    # simultaneously eligible recs) that caused the 0.10 revert on 2026-09-18. A higher
+    # per-bet cap under that footprint is the same simultaneous-exposure concern as then;
+    # it is accepted deliberately here, not overlooked. Revert is one number.
+    max_stake_pct: float = 0.08          # cap suggested stake at 8% of bankroll
 
     # --- Trade policy ---
     pregame_only: bool = True             # only recommend games in "Preview" (no live/final)

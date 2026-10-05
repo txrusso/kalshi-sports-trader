@@ -76,6 +76,10 @@ DEFAULT_CONFIG = Path(__file__).resolve().parent.parent / "notify_config.txt"
 AUDIT_LOG = Path(__file__).resolve().parent.parent / "logs" / "notifications.jsonl"
 _REQUIRED = ("smtp_host", "smtp_port", "sender_email", "sender_password", "recipient")
 
+# Values that turn a boolean config key OFF. Anything else (including absent)
+# leaves the channel on, so a typo can never silently disable alerts.
+_FALSEY = {"0", "false", "no", "off", "none", "disabled"}
+
 # Delivery tuning. Every one of these is overridable from notify_config.txt
 # (same `key = value` syntax as the credentials).
 _TUNING_DEFAULTS = {
@@ -366,7 +370,19 @@ class SmsNotifier:
         return _load_config(path)
 
     @property
+    def disabled_by_config(self) -> bool:
+        """`sms_enabled = false` in notify_config.txt. A deliberate OFF switch
+        that leaves the credentials in place, so turning texts back on is a
+        one-line edit rather than re-issuing a Gmail App Password. Distinct
+        from `enabled`, which also covers "never configured" -- `cli.py
+        notify-test` reports the two differently so a silent channel is never
+        ambiguous."""
+        return str(self.cfg.get("sms_enabled", "")).strip().lower() in _FALSEY
+
+    @property
     def enabled(self) -> bool:
+        if self.disabled_by_config:
+            return False
         if not all(self.cfg.get(k) for k in _REQUIRED):
             return False
         # Treat the placeholder password as "not configured yet".
@@ -411,6 +427,9 @@ class SmsNotifier:
         """Queue the text for paced delivery. The return value says whether it
         was QUEUED, not whether it arrived — nothing on this channel can tell
         us that. Check logs/notifications.jsonl for when each attempt left."""
+        if self.disabled_by_config:
+            log.info("SMS alerts are OFF (sms_enabled=false in %s); skipping.", self.path.name)
+            return False
         if not self.enabled:
             log.info("SMS notifier not configured (%s); skipping alert.", self.path.name)
             return False

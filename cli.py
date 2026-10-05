@@ -598,7 +598,11 @@ def cmd_notify_test(args) -> None:
 
     print("NOTIFICATION CHANNELS")
     print(f"  config      : {sms.path}")
-    print(f"  SMS         : {'configured' if sms.enabled else 'NOT CONFIGURED'}"
+    # "OFF" and "NOT CONFIGURED" are different problems -- one is deliberate,
+    # the other is a channel that was never going to work. Never conflate them.
+    sms_state = ("OFF (sms_enabled=false)" if sms.disabled_by_config
+                 else "configured" if sms.enabled else "NOT CONFIGURED")
+    print(f"  SMS         : {sms_state}"
           f"  -> {', '.join(sms.recipients) or '(no recipients)'}")
     print(f"  ntfy push   : {'configured' if push.enabled else 'NOT CONFIGURED'}"
           f"  -> {push.server}/{push.topic or '(no topic)'}")
@@ -626,7 +630,11 @@ def cmd_notify_test(args) -> None:
         else:
             print("  push : skipped (ntfy_topic is blank in notify_config.txt)")
 
-        if sms.enabled:
+        if sms.disabled_by_config:
+            print("  sms  : skipped -- texts are OFF (sms_enabled=false in "
+                  "notify_config.txt). Set it to true to turn them back on; "
+                  "the credentials are still there.")
+        elif sms.enabled:
             for rcpt in sms.recipients:
                 body = sms.clip(f"KALSHI notify-test {stamp}. Reply not needed.")
                 try:

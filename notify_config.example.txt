@@ -54,3 +54,15 @@ ntfy_server = https://ntfy.sh
 
 # How long a process waits on exit for queued alerts to finish sending.
 # shutdown_flush_seconds = 90
+
+# ---- Turning a channel OFF -------------------------------------------
+# sms_enabled = false   turns TEXT alerts off while LEAVING the
+# credentials above in place, so switching back on is a one-line edit
+# rather than re-issuing a Gmail App Password. Absent (or any value
+# other than false/no/0/off/disabled) means ON -- a typo can never
+# silently kill your alerts.
+#
+# ntfy push is a SEPARATE channel and is not affected by this; to turn
+# push off instead, blank out ntfy_topic.
+#
+# sms_enabled = false

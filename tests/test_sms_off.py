@@ -109,3 +109,65 @@ class EveryCallerGoesThroughTheSwitch(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MasterSwitch(unittest.TestCase):
+    """`notifications_enabled = false` -- every channel off at once
+    (2026-10-05, user: "turn them all off")."""
+
+    def test_production_config_has_everything_off(self):
+        self.assertFalse(SmsNotifier().enabled)
+        self.assertFalse(PushNotifier().enabled)
+
+    def test_master_switch_kills_sms_and_push_together(self):
+        c = cfg("notifications_enabled = false\n")
+        self.assertTrue(SmsNotifier(c).disabled_by_config)
+        self.assertTrue(PushNotifier(c).disabled_by_config)
+        self.assertFalse(SmsNotifier(c).enabled)
+        self.assertFalse(PushNotifier(c).enabled)
+
+    def test_send_is_blocked_on_both_channels(self):
+        c = cfg("notifications_enabled = false\n")
+        with mock.patch.object(SmsNotifier, "send_now") as sn, \
+             mock.patch.object(PushNotifier, "send_now") as pn:
+            self.assertFalse(SmsNotifier(c).send("x"))
+            self.assertFalse(PushNotifier(c).send({"title": "t", "body": "b"}))
+        sn.assert_not_called()
+        pn.assert_not_called()
+
+    def test_the_raw_transport_refuses_too(self):
+        # A kill switch a direct send_now() can walk around is not a kill
+        # switch. Both must raise rather than deliver.
+        from engine.notify import NotificationsDisabled
+        c = cfg("notifications_enabled = false\n")
+        with self.assertRaises(NotificationsDisabled):
+            SmsNotifier(c).send_now("x", "a@b.com")
+        with self.assertRaises(NotificationsDisabled):
+            PushNotifier(c).send_now({"title": "t", "body": "b"})
+
+    def test_no_smtp_connection_is_attempted_when_off(self):
+        import smtplib
+        c = cfg("notifications_enabled = false\n")
+        from engine.notify import NotificationsDisabled
+        with mock.patch.object(smtplib, "SMTP") as smtp:
+            with self.assertRaises(NotificationsDisabled):
+                SmsNotifier(c).send_now("x", "a@b.com")
+        smtp.assert_not_called()
+
+    def test_push_can_be_turned_off_alone(self):
+        c = cfg("push_enabled = false\n")
+        self.assertTrue(PushNotifier(c).disabled_by_config)
+        self.assertTrue(SmsNotifier(c).enabled, "sms should be untouched")
+
+    def test_topic_is_preserved_so_push_is_reversible(self):
+        c = cfg("notifications_enabled = false\n")
+        self.assertEqual(PushNotifier(c).topic, "some-topic")
+
+    def test_master_true_restores_both(self):
+        c = cfg("notifications_enabled = true\n")
+        self.assertTrue(SmsNotifier(c).enabled)
+        self.assertTrue(PushNotifier(c).enabled)
+
+    def test_absent_master_key_leaves_channels_on(self):
+        self.assertTrue(SmsNotifier(cfg()).enabled)
+        self.assertTrue(PushNotifier(cfg()).enabled)

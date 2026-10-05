@@ -74,11 +74,33 @@ log = logging.getLogger("engine.notify")
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent.parent / "notify_config.txt"
 AUDIT_LOG = Path(__file__).resolve().parent.parent / "logs" / "notifications.jsonl"
+class NotificationsDisabled(RuntimeError):
+    """Raised by a raw `send_now` when alerts are switched off. Callers that
+    go through `send()` never see this -- it exists so a DIRECT transport call
+    fails loudly instead of quietly delivering a message the user turned off."""
+
+
 _REQUIRED = ("smtp_host", "smtp_port", "sender_email", "sender_password", "recipient")
 
 # Values that turn a boolean config key OFF. Anything else (including absent)
 # leaves the channel on, so a typo can never silently disable alerts.
 _FALSEY = {"0", "false", "no", "off", "none", "disabled"}
+
+
+def _off(cfg: dict, key: str) -> bool:
+    return str(cfg.get(key, "")).strip().lower() in _FALSEY
+
+
+def notifications_off(cfg: dict) -> bool:
+    """`notifications_enabled = false` -- the MASTER switch, covering every
+    channel at once (2026-10-05, user: "turn them all off").
+
+    Enforced at the raw transport (`send_now`) on BOTH notifiers, not just at
+    `send()`. That is the point: `send()` is the polite path, but
+    `cli.py notify-test` and any future caller can reach `send_now` directly,
+    and a kill switch that a direct call can walk around is not a kill
+    switch."""
+    return _off(cfg, "notifications_enabled")
 
 # Delivery tuning. Every one of these is overridable from notify_config.txt
 # (same `key = value` syntax as the credentials).
@@ -377,7 +399,7 @@ class SmsNotifier:
         from `enabled`, which also covers "never configured" -- `cli.py
         notify-test` reports the two differently so a silent channel is never
         ambiguous."""
-        return str(self.cfg.get("sms_enabled", "")).strip().lower() in _FALSEY
+        return notifications_off(self.cfg) or _off(self.cfg, "sms_enabled")
 
     @property
     def enabled(self) -> bool:
@@ -411,6 +433,10 @@ class SmsNotifier:
     def send_now(self, message: str, recipient: Optional[str] = None) -> None:
         """Synchronous single send. Raises on failure — the dispatcher turns
         that into a retry, and `cli.py notify-test` surfaces it to the user."""
+        if self.disabled_by_config:
+            raise NotificationsDisabled(
+                "text alerts are OFF (notifications_enabled/sms_enabled=false in "
+                f"{self.path.name})")
         msg = EmailMessage()
         msg["From"] = self.cfg["sender_email"]
         msg["To"] = recipient or self.recipients[0]
@@ -604,12 +630,23 @@ class PushNotifier:
         return self.cfg.get("ntfy_topic", "").strip()
 
     @property
+    def disabled_by_config(self) -> bool:
+        """Off via the master switch or `push_enabled = false`. Blanking
+        `ntfy_topic` also disables push, but that loses the topic; this does
+        not, so it can be switched back on without re-subscribing the phone."""
+        return notifications_off(self.cfg) or _off(self.cfg, "push_enabled")
+
+    @property
     def enabled(self) -> bool:
-        return bool(self.topic)
+        return bool(self.topic) and not self.disabled_by_config
 
     def send_now(self, slip: dict) -> None:
         """Synchronous single POST. Raises on any non-2xx or network error, so
         the dispatcher can retry it."""
+        if self.disabled_by_config:
+            raise NotificationsDisabled(
+                "push alerts are OFF (notifications_enabled/push_enabled=false in "
+                f"{self.path.name})")
         headers = {
             # HTTP header values must be latin-1 safe; keep title ASCII.
             "Title": slip["title"].encode("ascii", "replace").decode("ascii"),

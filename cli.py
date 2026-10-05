@@ -598,19 +598,27 @@ def cmd_notify_test(args) -> None:
 
     print("NOTIFICATION CHANNELS")
     print(f"  config      : {sms.path}")
+    from engine.notify import notifications_off
+    if notifications_off(sms.cfg):
+        print("  >> ALL NOTIFICATIONS ARE OFF (notifications_enabled=false). "
+              "Nothing will be sent on any channel.")
     # "OFF" and "NOT CONFIGURED" are different problems -- one is deliberate,
     # the other is a channel that was never going to work. Never conflate them.
     sms_state = ("OFF (sms_enabled=false)" if sms.disabled_by_config
                  else "configured" if sms.enabled else "NOT CONFIGURED")
     print(f"  SMS         : {sms_state}"
           f"  -> {', '.join(sms.recipients) or '(no recipients)'}")
-    print(f"  ntfy push   : {'configured' if push.enabled else 'NOT CONFIGURED'}"
+    push_state = ("OFF (disabled in config)" if push.disabled_by_config
+                  else "configured" if push.enabled else "NOT CONFIGURED")
+    print(f"  ntfy push   : {push_state}"
           f"  -> {push.server}/{push.topic or '(no topic)'}")
 
     if not args.history_only:
         print("\nSending one test alert per channel (synchronously, so a failure "
               "shows its real error)...")
-        if push.enabled:
+        if push.disabled_by_config:
+            print("  push : skipped -- push alerts are OFF in notify_config.txt.")
+        elif push.enabled:
             slip = {"title": "KALSHI notify-test",
                     "body": f"ntfy push test sent {stamp}.\nIf you can read this, push works.",
                     "url": kalshi_market_url("KXMLBGAME-TEST-TEST"),

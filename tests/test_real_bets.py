@@ -200,3 +200,102 @@ class AgedOutOrder(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class RepriceFromRealFills(unittest.TestCase):
+    """Grade at the price that actually traded, not the limit we submitted.
+
+    Found 2026-10-06 reconciling the dashboard against the account balance:
+    the card read +$1.85 where the account was really +$6.04. A live ledger
+    row is written at SUBMIT time with the LIMIT price, and Kalshi routinely
+    fills better (one row recorded 0.31 and filled at 0.13), so grading off
+    the limit overstated every loss and understated every win.
+    """
+
+    def setUp(self):
+        real_bets.reset_fill_cache()
+
+    def tearDown(self):
+        real_bets.reset_fill_cache()
+
+    def _client(self, fills):
+        return type("C", (), {"get_all_fills": lambda self_: fills})()
+
+    def test_yes_fill_reprices_to_the_executed_price(self):
+        idx = real_bets._ticker_fills(self._client([
+            {"ticker": "T1", "action": "buy", "outcome_side": "yes",
+             "count_fp": "4.56", "yes_price_dollars": "0.1300",
+             "no_price_dollars": "0.8700", "fee_cost": "0.0362"},
+        ]))
+        self.assertAlmostEqual(idx["T1"]["price"], 0.13, places=4)
+        self.assertAlmostEqual(idx["T1"]["contracts"], 4.56, places=2)
+
+    def test_no_side_fill_is_counted_and_priced_from_the_no_leg(self):
+        # THE BUG THIS CLASS EXISTS FOR. Buying NO is submitted as a YES ASK,
+        # so Kalshi records it action="sell", outcome_side="no". A filter of
+        # action == "buy" drops every NO bet and leaves it at its limit.
+        idx = real_bets._ticker_fills(self._client([
+            {"ticker": "T2", "action": "sell", "outcome_side": "no",
+             "count_fp": "1.53", "yes_price_dollars": "0.5400",
+             "no_price_dollars": "0.4600", "fee_cost": "0.0267"},
+        ]))
+        self.assertIn("T2", idx, "a NO-side fill must not be skipped")
+        self.assertAlmostEqual(idx["T2"]["price"], 0.46, places=4)
+
+    def test_several_fills_average_by_size(self):
+        idx = real_bets._ticker_fills(self._client([
+            {"ticker": "T3", "action": "buy", "outcome_side": "yes", "count_fp": "1.00",
+             "yes_price_dollars": "0.2000", "fee_cost": "0.01"},
+            {"ticker": "T3", "action": "buy", "outcome_side": "yes", "count_fp": "3.00",
+             "yes_price_dollars": "0.4000", "fee_cost": "0.02"},
+        ]))
+        self.assertAlmostEqual(idx["T3"]["contracts"], 4.0, places=4)
+        self.assertAlmostEqual(idx["T3"]["price"], 0.35, places=4)   # size-weighted
+        self.assertAlmostEqual(idx["T3"]["fees"], 0.03, places=4)
+
+    def test_apply_real_fill_keeps_what_was_recorded(self):
+        row = real_bets.apply_real_fill(
+            {"ticker": "T1", "entry_price": 0.31, "contracts": 4.56, "wager_usd": 1.41},
+            {"price": 0.13, "contracts": 4.56, "fees": 0.0362})
+        self.assertAlmostEqual(row["entry_price"], 0.13)
+        self.assertAlmostEqual(row["recorded_entry_price"], 0.31)
+        self.assertAlmostEqual(row["wager_usd"], 0.5928, places=4)
+        self.assertAlmostEqual(row["fees_usd"], 0.0362, places=6)
+
+    def test_a_better_fill_turns_a_smaller_loss(self):
+        from output.dashboard_stats import graded_rows
+        bet = {"ticker": "KXMLBGAME-26SEP232040AZCOL-COL", "side": "YES",
+               "entry_price": 0.31, "contracts": 4.56, "edge_cents": 5.0}
+        at_limit = graded_rows([bet], {bet["ticker"]: False})[0]
+        filled = real_bets.apply_real_fill(bet, {"price": 0.13, "contracts": 4.56,
+                                                 "fees": 0.0362})
+        at_fill = graded_rows([filled], {bet["ticker"]: False})[0]
+        self.assertAlmostEqual(at_limit["profit"], -1.4136, places=3)
+        self.assertAlmostEqual(at_fill["profit"], -0.5928, places=3)
+        self.assertGreater(at_fill["profit"], at_limit["profit"])
+
+    def test_no_client_or_old_client_degrades_to_recorded_prices(self):
+        self.assertEqual(real_bets._ticker_fills(None), {})
+        real_bets.reset_fill_cache()
+        self.assertEqual(real_bets._ticker_fills(object()), {})   # no get_all_fills
+
+    def test_a_failing_fetch_is_not_fatal(self):
+        class Boom:
+            def get_all_fills(self_):
+                raise RuntimeError("HTTP 500")
+        self.assertEqual(real_bets._ticker_fills(Boom()), {})
+
+    def test_cache_expires_so_a_long_run_sees_new_fills(self):
+        calls = []
+
+        class C:
+            def get_all_fills(self_):
+                calls.append(1)
+                return [{"ticker": "T", "outcome_side": "yes", "count_fp": "1",
+                         "yes_price_dollars": "0.50", "fee_cost": "0"}]
+        real_bets._ticker_fills(C())
+        real_bets._ticker_fills(C())
+        self.assertEqual(len(calls), 1, "second call within the TTL should be cached")
+        real_bets._TICKER_FILLS_AT -= real_bets._TICKER_FILLS_TTL + 1
+        real_bets._ticker_fills(C())
+        self.assertEqual(len(calls), 2, "a stale cache must refetch")

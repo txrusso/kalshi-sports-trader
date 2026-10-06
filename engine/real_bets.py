@@ -24,6 +24,7 @@ Read-only: only GETs, and never writes a ledger.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Optional
 
 log = logging.getLogger("engine.real_bets")
@@ -101,6 +102,99 @@ def apply_fill(bet: dict, status: str, filled: float) -> dict:
     return out
 
 
+# ticker -> {"contracts", "price", "fees"} from the account's real fills.
+# TTL'd rather than built once per process: the dashboard and the loop both
+# run for hours, and a fill that lands mid-session has to show up without a
+# restart. One paginated fetch per TTL against hundreds of graded rows.
+_TICKER_FILLS: Optional[dict] = None
+_TICKER_FILLS_AT: float = 0.0
+_TICKER_FILLS_TTL = 60.0
+
+
+def reset_fill_cache() -> None:
+    """Drop the cached fills. For tests, and for any caller that needs a
+    guaranteed-fresh read."""
+    global _TICKER_FILLS, _TICKER_FILLS_AT
+    _TICKER_FILLS, _TICKER_FILLS_AT = None, 0.0
+
+
+def _ticker_fills(client) -> dict:
+    """What actually traded, per ticker, from Kalshi's own fills.
+
+    WHY THIS EXISTS (found 2026-10-06 reconciling the dashboard against the
+    balance). A live ledger row is written at SUBMIT time and its
+    `entry_price` is the LIMIT we sent, not the price we got. Kalshi fills at
+    the best available price, which is routinely better: on
+    KXMLBGAME-26SEP232040AZCOL-COL the ledger recorded 0.31 and the fill was
+    0.13. Grading off the limit overstates every loss and understates every
+    win, and across the live ledger it understated realized P&L by $4.63 --
+    the dashboard read +$1.85 where the account was really +$6.04.
+
+    `apply_fill` below already trimmed CONTRACTS for a partial fill; it never
+    touched price, and it only ran when the submit-time status was not
+    "filled", so a fully-filled order was always taken at its limit.
+    """
+    global _TICKER_FILLS, _TICKER_FILLS_AT
+    if _TICKER_FILLS is not None and (time.monotonic() - _TICKER_FILLS_AT) < _TICKER_FILLS_TTL:
+        return _TICKER_FILLS
+    if client is None or not hasattr(client, "get_all_fills"):
+        return {}
+    try:
+        fills = client.get_all_fills()
+    except Exception:
+        log.warning("Could not fetch fills; grading rows at their recorded price.",
+                    exc_info=True)
+        return {}
+    agg: dict = {}
+    for f in fills:
+        # Do NOT filter on `action`. Buying NO is submitted as a YES ASK (see
+        # CLAUDE.md's "Live order execution"), so Kalshi records a NO bet as
+        # action="sell" with outcome_side="no" -- filtering to action=="buy"
+        # silently drops every NO-side bet and leaves it priced at its limit.
+        # This agent never sells to close; it holds to settlement, so every
+        # fill on the account is a position being opened. `outcome_side` is
+        # the field that says which side, and it is what we key on.
+        t = f.get("ticker") or f.get("market_ticker")
+        try:
+            ct = float(f.get("count_fp") or 0)
+        except (TypeError, ValueError):
+            continue
+        if not t or ct <= 0:
+            continue
+        side = (f.get("outcome_side") or f.get("side") or "yes").lower()
+        key = "no_price_dollars" if side == "no" else "yes_price_dollars"
+        try:
+            px = float(f.get(key) or 0)
+        except (TypeError, ValueError):
+            continue
+        a = agg.setdefault(t, {"contracts": 0.0, "cost": 0.0, "fees": 0.0})
+        a["contracts"] += ct
+        a["cost"] += px * ct
+        a["fees"] += float(f.get("fee_cost") or 0)
+    for a in agg.values():
+        a["price"] = a["cost"] / a["contracts"] if a["contracts"] else 0.0
+    _TICKER_FILLS, _TICKER_FILLS_AT = agg, time.monotonic()
+    return agg
+
+
+def apply_real_fill(bet: dict, got: dict) -> dict:
+    """Re-price and re-size one row to what actually traded, keeping the
+    recorded values as `recorded_*` so nothing is lost."""
+    price = round(float(got["price"]), 4)
+    ct = round(float(got["contracts"]), 2)
+    out = {**bet}
+    if abs(price - float(bet.get("entry_price") or 0)) > 1e-9:
+        out["recorded_entry_price"] = bet.get("entry_price")
+        out["entry_price"] = price
+    if abs(ct - float(bet.get("contracts") or 0)) > 1e-9:
+        out.setdefault("requested_contracts", bet.get("contracts"))
+        out["contracts"] = ct
+    out["wager_usd"] = round(price * ct, 4)
+    out["fees_usd"] = round(float(got["fees"]), 6)   # real fee, not the model
+    out["_repriced"] = True
+    return out
+
+
 def load_real_bets(client=None, include_unfilled: bool = False) -> list[dict]:
     """Both ledgers, each row tagged `_src` ("live" / "paper"), live rows
     corrected to what actually filled.
@@ -137,4 +231,25 @@ def load_real_bets(client=None, include_unfilled: bool = False) -> list[dict]:
         if row.get("_nofill") and not include_unfilled:
             continue
         bets.append(row)
+
+    # Re-price EVERY row (both ledgers) against the real fills. The paper rows
+    # were placed by hand and carry the alert's price, which is no more the
+    # executed price than the live rows' limit was.
+    fills = _ticker_fills(client)
+    if fills:
+        out = []
+        for b in bets:
+            got = fills.get(b.get("ticker"))
+            if got:
+                out.append(apply_real_fill(b, got))
+            elif b.get("_src") == "paper":
+                # No fill anywhere on the account: this alert was never acted
+                # on. Keep it only when explicitly asked for, the same way a
+                # never-filled live order is handled.
+                b = {**b, "_nofill": True, "_fill_status": "no fill on account"}
+                if include_unfilled:
+                    out.append(b)
+            else:
+                out.append(b)
+        bets = out
     return bets

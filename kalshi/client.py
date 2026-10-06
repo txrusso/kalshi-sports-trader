@@ -257,6 +257,14 @@ class KalshiClient:
             params["ticker"] = ticker
         return self._get("/portfolio/fills", params).get("fills", []) or []
 
+    def get_all_fills(self) -> list[dict]:
+        """EVERY fill on the account, paginated. `get_fills` above takes a
+        limit and no cursor, so it can only ever see the most recent page --
+        fine for the maker manager watching one order, useless for grading the
+        whole history. engine/real_bets.py uses this to correct each ledger
+        row to the price and size that actually traded."""
+        return list(self._paginate("/portfolio/fills", {"limit": 200}, "fills"))
+
     def get_order(self, order_id: str) -> dict:
         """One order's current state (status, remaining_count, fill_count)."""
         return self._get(f"/portfolio/orders/{order_id}").get("order", {}) or {}

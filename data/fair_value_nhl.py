@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from config.settings import Settings, DEFAULTS
-from data.fair_value import FairValue
+from data.fair_value import FairValue, has_started
 from data.nhl_data import NhlDataClient
 from kalshi.normalize import MarketQuote
 from signals.elo_nhl import EloRatings, win_prob
@@ -124,7 +124,8 @@ class NhlFairValueModel:
         # signal NFL/NBA get, "unverifiable => unsafe" treatment.
         away = pt.opponent if pt.yes_is_home else pt.yes_team
         home = pt.yes_team if pt.yes_is_home else pt.opponent
-        if self.nhl_data.find_game(pt.date_str, away, home) is None:
+        g = self.nhl_data.find_game(pt.date_str, away, home)
+        if g is None:
             return FairValue(None, "none", 0.0,
                              {"reason": "no game found (likely preseason)"})
 
@@ -132,7 +133,10 @@ class NhlFairValueModel:
         if occurrence is None:
             return FairValue(None, "none", 0.0, {"reason": "no occurrence_datetime on quote"})
 
-        started = datetime.now(timezone.utc) >= occurrence
+        # Judge 'started' against the SCHEDULE's real start, not Kalshi's
+        # occurrence_datetime, which runs ~3h late here. See
+        # data/fair_value.py::has_started.
+        started = has_started(occurrence, g.puck_drop_utc)
         game_state = "Live" if started else "Preview"
         if self.settings.pregame_only and started:
             return FairValue(None, "skip_non_pregame", 0.0,

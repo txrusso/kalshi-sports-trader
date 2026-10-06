@@ -72,6 +72,38 @@ ELO_WEIGHT = 0.2
 # overfit to the single-sample test. See backtest/bankroll_sim.py for the sweep.
 
 
+def has_started(occurrence: Optional[datetime],
+                schedule_start: Optional[datetime] = None,
+                now: Optional[datetime] = None) -> bool:
+    """Has this game actually begun?
+
+    PREFER THE SCHEDULE'S OWN START TIME over Kalshi's `occurrence_datetime`,
+    which runs ~3h LATE on NFL and NHL (a long-documented skew -- see
+    CLAUDE.md's NFL section). Until 2026-10-06 every pregame model judged
+    "started" against the skewed field while engine/paper.py's trigger used
+    the real kickoff/puck-drop from the sport's own schedule. The two clocks
+    disagreed by hours, so the trigger correctly saw a game in progress and
+    offered it as an in-game bet while the model, believing it was still
+    pregame, happily returned a FULL-GAME estimate for it.
+
+    That put 17 real bets on games already under way -- 10 NFL, 7 NHL, up to
+    39 minutes in -- priced by models with no view of the score. It is the
+    same defect class as the MLB-totals one in the in-game section of
+    CLAUDE.md, and it defeated the `fair_source.startswith("pregame")`
+    refusal in signals/recommendation.py too, since that keys off
+    `game_state`, which was set from the same skewed clock.
+
+    `schedule_start` is NflGame.kickoff_utc / NhlGame.puck_drop_utc. NBA has
+    no independent time source (documented gap), so it passes None and falls
+    back to `occurrence` -- no worse than before, and the fallback is the
+    only option there.
+    """
+    start = schedule_start or occurrence
+    if start is None:
+        return False
+    return (now or datetime.now(timezone.utc)) >= start
+
+
 @dataclass
 class FairValue:
     prob: Optional[float]      # fair P(YES team wins), 0..1

@@ -147,7 +147,27 @@ class Settings:
     #
     # Scope: this gates the automatic loop only. `cli.py place --confirm`
     # is a deliberate human action and is intentionally still allowed.
-    live_trade_disabled_sports: tuple[str, ...] = ("nhl",)
+    # NHL RE-ENABLED 2026-10-06 at the user's request, after 5 days and 33
+    # simulated bets in output/shadow_ledger.jsonl. Read the evidence honestly
+    # before changing this again:
+    #   shadow (recalibrated model, no money):  16-17, ROI  -4.6% on $35.33
+    #       totals  12-9   ROI  +7.3%
+    #       winner   4-8   ROI -24.5%
+    #   real money before the switch:            3-8,  ROI -57.5%
+    #       totals   1-5   ROI -73.5%
+    #       winner   2-3   ROI -34.9%
+    # Two things worth keeping straight. The CALIBRATION DID NOT CHANGE in that
+    # window -- backtest/nhl_recalibrate.py reported "no change, 0 both-splits
+    # winners" on all six mornings and every one of the 33 shadow bets carries
+    # model_version "shipped-2026-09-30". What is new is a forward test, not a
+    # better model. And that forward test is mildly NEGATIVE overall, though it
+    # flips the original diagnosis: the recalibrated TOTALS model is the one
+    # holding up (+7.3%) and the untouched WINNER model is now the drag
+    # (-24.5%). Both n are 12-21, well inside noise, so neither is a finding --
+    # which is also why no per-market-kind gate was added off the back of it.
+    # The per-game team-strength signal is still measured at corr +0.042 and
+    # still loses to a league-average baseline.
+    live_trade_disabled_sports: tuple[str, ...] = ()
     include_totals: bool = True           # scan over/under (total runs) markets
     totals_min_mid: float = 0.12          # only consider near-the-money O/U lines
     totals_max_mid: float = 0.88          #   (skip deep ITM/OTM ladder rungs)

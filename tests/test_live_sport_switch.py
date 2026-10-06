@@ -2,10 +2,14 @@
 (config/settings.py::live_trade_disabled_sports, enforced in
 engine/live.py::run_live_trigger).
 
-NHL was switched off 2026-09-30 after day one went 1-4 on totals; NFL must
-keep trading. These tests pin both halves of that, plus the property that
-matters most: a disabled sport is refused BEFORE anything reaches Kalshi and
-without writing a ledger row.
+NHL was switched off 2026-09-30 after day one went 1-4 on totals, and back ON
+2026-10-06 after 33 shadow bets (see config/settings.py for the numbers). The
+production default therefore trades every sport TODAY -- but the mechanism has
+to keep working, because it is the only brake available if a sport has to come
+off real money again in a hurry. These tests exercise the switch with an
+EXPLICIT config rather than relying on the default, and separately pin what
+the live default actually is, so flipping it can never silently gut the
+coverage.
 """
 from __future__ import annotations
 
@@ -18,6 +22,10 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from config.settings import DEFAULTS                     # noqa: E402
+
+# The switch under test, applied explicitly. Production's own default is
+# asserted separately in LiveTradingDefaults below.
+NHL_OFF = replace(DEFAULTS, live_trade_disabled_sports=("nhl",))
 from engine import live as live_mod                      # noqa: E402
 
 
@@ -62,13 +70,9 @@ class LiveSportSwitch(unittest.TestCase):
                                                settings, 25.0)
         return submitted, placed, ledger
 
-    def test_nhl_is_off_by_default_and_nfl_is_not(self):
-        self.assertIn("nhl", DEFAULTS.live_trade_disabled_sports)
-        self.assertNotIn("nfl", DEFAULTS.live_trade_disabled_sports)
-
     def test_nhl_order_is_never_submitted(self):
         submitted, placed, ledger = self._run(
-            ["KXNHLGAME-26OCT01NYITOR-TOR", "KXNHLTOTAL-26OCT01NYITOR-6"], DEFAULTS)
+            ["KXNHLGAME-26OCT01NYITOR-TOR", "KXNHLTOTAL-26OCT01NYITOR-6"], NHL_OFF)
         self.assertEqual(submitted, [])
         self.assertEqual(placed, [])
         self.assertEqual(ledger.rows, [], "a blocked sport must not write a ledger row")
@@ -76,14 +80,14 @@ class LiveSportSwitch(unittest.TestCase):
     def test_nfl_still_trades_live(self):
         submitted, placed, _ = self._run(
             ["KXNFLGAME-26OCT01PITCLE-PIT", "KXNFLTOTAL-26OCT01PITCLE-42",
-             "KXNFLSPREAD-26OCT01PITCLE-PIT3"], DEFAULTS)
+             "KXNFLSPREAD-26OCT01PITCLE-PIT3"], NHL_OFF)
         self.assertEqual(len(submitted), 3)
         self.assertEqual(len(placed), 3)
 
     def test_a_mixed_cycle_blocks_only_the_disabled_sport(self):
         submitted, placed, ledger = self._run(
             ["KXNHLGAME-26OCT01NYITOR-TOR", "KXNFLGAME-26OCT01PITCLE-PIT",
-             "KXNHLTOTAL-26OCT01NYITOR-6", "KXNFLTOTAL-26OCT01PITCLE-42"], DEFAULTS)
+             "KXNHLTOTAL-26OCT01NYITOR-6", "KXNFLTOTAL-26OCT01PITCLE-42"], NHL_OFF)
         self.assertEqual(submitted, ["KXNFLGAME-26OCT01PITCLE-PIT",
                                      "KXNFLTOTAL-26OCT01PITCLE-42"])
         self.assertEqual(len(ledger.rows), 2)
@@ -91,7 +95,7 @@ class LiveSportSwitch(unittest.TestCase):
     def test_maker_path_is_blocked_too(self):
         # The maker path rests an order on the book instead of crossing; it
         # leaves through the same loop, so the switch must cover it.
-        settings = replace(DEFAULTS, maker_mode=True)
+        settings = replace(NHL_OFF, maker_mode=True)
         recs = [_Rec("KXNHLTOTAL-26OCT01NYITOR-6")]
         maker = mock.Mock()
         with mock.patch.object(live_mod, "iter_trigger_candidates",
@@ -113,6 +117,26 @@ class LiveSportSwitch(unittest.TestCase):
         submitted, _, _ = self._run(
             ["KXNFLGAME-26OCT01PITCLE-PIT", "KXNHLGAME-26OCT01NYITOR-TOR"], settings)
         self.assertEqual(submitted, ["KXNHLGAME-26OCT01NYITOR-TOR"])
+
+
+class LiveTradingDefaults(unittest.TestCase):
+    """What production actually does today. Separate from the mechanism tests
+    above on purpose: when a sport is switched on or off, exactly this class
+    should change and the rest should keep passing untouched."""
+
+    def test_every_sport_trades_live_today(self):
+        # NHL came back on 2026-10-06. If this fails, someone barred a sport --
+        # check config/settings.py for the evidence they recorded.
+        self.assertEqual(DEFAULTS.live_trade_disabled_sports, ())
+
+    def test_the_switch_still_works_even_though_nothing_uses_it(self):
+        submitted, _, _ = self._submit_with(NHL_OFF)
+        self.assertEqual(submitted, [])
+        submitted, _, _ = self._submit_with(DEFAULTS)
+        self.assertEqual(submitted, ["KXNHLGAME-26OCT01NYITOR-TOR"])
+
+    def _submit_with(self, settings):
+        return LiveSportSwitch._run(self, ["KXNHLGAME-26OCT01NYITOR-TOR"], settings)
 
 
 class ShadowLedgerSeparation(unittest.TestCase):

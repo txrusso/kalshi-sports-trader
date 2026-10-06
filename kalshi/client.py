@@ -265,6 +265,15 @@ class KalshiClient:
         row to the price and size that actually traded."""
         return list(self._paginate("/portfolio/fills", {"limit": 200}, "fills"))
 
+    def get_all_settlements(self) -> list[dict]:
+        """Every settled position on the account, paginated.
+
+        This is Kalshi's OWN record of what each market paid: `revenue` (in
+        CENTS), the cost actually paid, and the fee. It is the authority the
+        dashboard reconciles against -- output/dashboard_stats.py's
+        untracked_pnl uses it to find realized money no ledger row covers."""
+        return list(self._paginate("/portfolio/settlements", {"limit": 200}, "settlements"))
+
     def get_order(self, order_id: str) -> dict:
         """One order's current state (status, remaining_count, fill_count)."""
         return self._get(f"/portfolio/orders/{order_id}").get("order", {}) or {}

@@ -15,9 +15,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from engine.account_summary import _grade                        # noqa: E402
-from output.dashboard_stats import (                              # noqa: E402
+from output.dashboard_stats import (untracked_pnl,                              # noqa: E402
     alert_status, calibration_table, drawdown, graded_rows, log_health,
-    parse_calibration_log, parse_tasks, rec_table, resting_orders, tally, today_risk,
+    parse_calibration_log, parse_tasks, rec_table, resting_orders, sim_table, tally, today_risk,
 )
 
 UTC = timezone.utc
@@ -73,6 +73,17 @@ class RecTable(unittest.TestCase):
         self.assertAlmostEqual(total.net, total.profit - total.fees)
         self.assertAlmostEqual(total.vs_expected, total.profit - total.expected)
         self.assertAlmostEqual(total.roi, total.net / total.staked)
+
+    def test_sim_table_relabels_total_and_keeps_breakdown(self):
+        g = graded_rows(BETS, OUTCOMES)
+        real, sim = rec_table(g), sim_table(g)
+        self.assertEqual(sim[0][:2], ("sim", "SIMULATED"))
+        self.assertNotIn("all", [lvl for lvl, _, _ in sim])
+        self.assertEqual([r[:2] for r in sim[1:]], [r[:2] for r in real[1:]])
+        self.assertEqual(sim[0][2].profit, real[0][2].profit)
+
+    def test_sim_table_empty(self):
+        self.assertEqual(sim_table([]), [])
 
     def test_empty(self):
         rows = rec_table([])
@@ -215,3 +226,76 @@ class Resting(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class UntrackedReconciliation(unittest.TestCase):
+    """Realized money on the account that no ledger row covers, so the OVERALL
+    card can be checked straight against the balance.
+
+    Computed from Kalshi's settlements every refresh rather than being a
+    constant: a hardcoded offset would be silently wrong the first time
+    another untracked trade or scalar refund landed.
+    """
+
+    @staticmethod
+    def s(ticker, revenue_cents, yes_cost=0.0, no_cost=0.0, fee=0.0):
+        return {"ticker": ticker, "revenue": revenue_cents,
+                "yes_total_cost_dollars": f"{yes_cost:.6f}",
+                "no_total_cost_dollars": f"{no_cost:.6f}",
+                "fee_cost": f"{fee:.6f}"}
+
+    def test_known_tickers_are_excluded(self):
+        u = untracked_pnl([self.s("A", 100, yes_cost=0.40)], {"A"})
+        self.assertEqual((u.n, u.net), (0, 0.0))
+
+    def test_an_unknown_winner_adds_its_realized_net(self):
+        # paid $0.40, market paid $1.00, 2c fee
+        u = untracked_pnl([self.s("B", 100, yes_cost=0.40, fee=0.02)], set())
+        self.assertEqual(u.n, 1)
+        self.assertAlmostEqual(u.net, 0.58, places=4)
+
+    def test_an_unknown_loser_subtracts(self):
+        u = untracked_pnl([self.s("C", 0, yes_cost=0.75, fee=0.01)], set())
+        self.assertAlmostEqual(u.net, -0.76, places=4)
+
+    def test_revenue_is_cents_and_costs_are_dollars(self):
+        # The factor-of-100 trap: revenue 254 is $2.54, not $254.
+        u = untracked_pnl([self.s("D", 254, yes_cost=0.762)], set())
+        self.assertAlmostEqual(u.net, 2.54 - 0.762, places=4)
+
+    def test_no_side_costs_are_counted(self):
+        u = untracked_pnl([self.s("E", 153, no_cost=0.7038, fee=0.0267)], set())
+        self.assertAlmostEqual(u.net, 1.53 - 0.7038 - 0.0267, places=4)
+
+    def test_malformed_rows_are_skipped_not_fatal(self):
+        rows = [self.s("F", 100, yes_cost=0.40),
+                {"ticker": "G", "revenue": "banana"},
+                {"revenue": 100},                      # no ticker
+                None if False else {"ticker": "H", "revenue": 100,
+                                    "yes_total_cost_dollars": None,
+                                    "no_total_cost_dollars": None,
+                                    "fee_cost": None}]
+        u = untracked_pnl(rows, set())
+        self.assertEqual(u.n, 2)                       # F and H; G and the no-ticker row skipped
+        self.assertAlmostEqual(u.net, 0.60 + 1.00, places=4)
+
+    def test_empty_or_none_is_zero(self):
+        self.assertEqual(untracked_pnl([], set()).net, 0.0)
+        self.assertEqual(untracked_pnl(None, set()).n, 0)
+
+    def test_card_net_is_tracked_plus_untracked(self):
+        from output.dashboard_stats import Tally, Untracked
+        from output.live_dashboard import totals_lines
+        t = Tally(); t.n = 3; t.profit = 12.85; t.fees = 6.19
+        line = totals_lines(t, Untracked(n=10, net=-0.63)).plain
+        self.assertIn("net +6.03", line)               # 12.85 - 6.19 - 0.63
+        self.assertIn("untracked -0.63", line)
+        self.assertIn("(10)", line)
+
+    def test_no_untracked_money_leaves_the_line_alone(self):
+        from output.dashboard_stats import Tally
+        from output.live_dashboard import totals_lines
+        t = Tally(); t.n = 3; t.profit = 12.85; t.fees = 6.19
+        line = totals_lines(t, None).plain
+        self.assertIn("net +6.66", line)
+        self.assertNotIn("untracked", line)

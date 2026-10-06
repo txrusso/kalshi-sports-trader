@@ -168,6 +168,62 @@ def rec_table(rows: list[dict]) -> list[tuple[str, str, Tally]]:
     return out
 
 
+def sim_table(rows: list[dict]) -> list[tuple[str, str, Tally]]:
+    """The Rec Table's SIMULATED section: shadow-ledger bets for sports barred
+    from real money (NHL as of 2026-09-30). Same shape as rec_table, with the
+    ALL row relabelled "sim" -- the caller renders it as its own block and
+    never folds it into ALL SPORTS, since none of this money was at risk."""
+    if not rows:
+        return []
+    out = rec_table(rows)
+    out[0] = ("sim", "SIMULATED", out[0][2])
+    return out
+
+
+@dataclass
+class Untracked:
+    """Realized money on the account that NO ledger row covers.
+
+    Two real sources, found 2026-10-06 reconciling the OVERALL card against
+    the balance (see CLAUDE.md, "Every report now grades at the FILL price"):
+      - trades placed by hand that were never written to either ledger (8 of
+        them, net -$0.59), and
+      - markets Kalshi settled as `market_result: "scalar"` -- effectively
+        refunds -- which data/games.py::resolve_outcomes cannot grade, so they
+        are not in `graded` and sit in settle's "Pending" forever.
+
+    This is computed from Kalshi's own settlements EVERY refresh rather than
+    being a constant, which matters: a hardcoded offset would be silently
+    wrong the first time either source gained another row.
+    """
+    n: int = 0
+    net: float = 0.0
+
+
+def untracked_pnl(settlements: Iterable[dict], known: set[str]) -> Untracked:
+    """Realized net of every settlement whose ticker isn't in `known`.
+
+    `revenue` is in CENTS and the cost fields are in dollars -- mixing those
+    up is a factor-of-100 error, so they are converted explicitly here.
+    """
+    n = 0
+    net = 0.0
+    for x in settlements or ():
+        t = x.get("ticker")
+        if not t or t in known:
+            continue
+        try:
+            rev = float(x.get("revenue") or 0) / 100.0
+            cost = (float(x.get("yes_total_cost_dollars") or 0)
+                    + float(x.get("no_total_cost_dollars") or 0))
+            fee = float(x.get("fee_cost") or 0)
+        except (TypeError, ValueError):
+            continue
+        n += 1
+        net += rev - cost - fee
+    return Untracked(n=n, net=round(net, 4))
+
+
 # ---------------------------------------------------------------------------
 # header cards
 # ---------------------------------------------------------------------------

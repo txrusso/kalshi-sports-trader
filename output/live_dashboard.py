@@ -46,10 +46,11 @@ from config.sports import market_kind, sport_of
 # shows. output/reporter.py already scrapes them back out for its own layout,
 # so reuse ITS regexes rather than writing a second pair that could drift.
 from output.reporter import _BOOK_TRADE_OI_RE, _CALIBRATION_RE
-from output.dashboard_stats import (  # noqa: E402  (bet_fee re-exported for callers)
+from output.dashboard_stats import (Untracked, untracked_pnl,  # noqa: E402  (bet_fee re-exported for callers)
     Drawdown, LogHealth, RestingOrders, Tally, TaskStatus, TodayRisk, ChannelStatus,
     alert_status, bet_fee, calibration_table, drawdown, graded_rows, log_health,
-    parse_calibration_log, parse_tasks, rec_table, resting_orders, tally, today_risk,
+    parse_calibration_log, parse_tasks, rec_table, resting_orders, sim_table, tally,
+    today_risk,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -65,6 +66,7 @@ CYAN = "#58a6ff"
 YELLOW = "bold #e3b341"
 WHITE = "#e6edf3"
 MUTED = "#8b949e"
+SIM = "#bc8cff"          # simulated (shadow-ledger) rows: never real money
 DIM = "dim"
 
 
@@ -117,7 +119,14 @@ class AccountData:
     unrealized: Optional[float] = None
     placed: dict[str, dict[str, datetime]] = field(default_factory=dict)
     graded: list[dict] = field(default_factory=list)      # every settled real bet
+    # Settled SIMULATED bets (output/shadow_ledger.jsonl -- sports barred from real
+    # money). Kept apart from `graded` so nothing that totals real money sees them.
+    shadow_graded: list[dict] = field(default_factory=list)
     totals: Optional[Tally] = None                         # fees / expected, all bets
+    # Realized money no ledger row covers, so the card can reconcile to the
+    # balance instead of sitting a few cents off it. Computed every refresh,
+    # never a constant -- see dashboard_stats.untracked_pnl.
+    untracked: Optional[Untracked] = None
     drawdown: Optional[Drawdown] = None
     today_risk: Optional[TodayRisk] = None
     yesterday: tuple[int, int, float] = (0, 0, 0.0)
@@ -451,6 +460,14 @@ def load_account() -> AccountData:
         data.curves = profit_curves(bets, outcomes)
         data.graded = graded_rows(bets, outcomes)
         data.totals = tally(data.graded)
+        # Reconcile to the account: anything Kalshi settled that `graded`
+        # doesn't cover. Own try -- a failed settlements call must cost the
+        # reconciliation line, never the whole card.
+        try:
+            known = {r["ticker"] for r in data.graded}
+            data.untracked = untracked_pnl(client.get_all_settlements(), known)
+        except Exception as e:
+            errs.append(f"untracked: {e}")
         data.drawdown = drawdown(data.curves.get("Overall", []))
         data.today_risk = today_risk(bets, outcomes, today, _game_date)
         # Yesterday, on exactly the same definitions (the game's ET date).
@@ -461,6 +478,17 @@ def load_account() -> AccountData:
         data.yesterday_risk = today_risk(bets, outcomes, yday, _game_date)
     except Exception as e:
         errs.append(f"ledger: {e}")
+
+    # Simulated bets, in their own try: a sideshow that moves no money must never
+    # cost the real record above.
+    try:
+        from engine.paper import ShadowLedger
+        shadow = ShadowLedger().load()
+        if shadow:
+            sh_out = resolve_outcomes({b["ticker"] for b in shadow}, clients)
+            data.shadow_graded = graded_rows(shadow, sh_out)
+    except Exception as e:
+        errs.append(f"shadow: {e}")
 
     if client is not None and data.pending:
         try:
@@ -908,13 +936,26 @@ def today_risk_line(risk: Optional[TodayRisk], day: str = "today") -> Text:
     return t
 
 
-def totals_lines(totals: Optional[Tally]) -> Text:
-    """Fees paid and the model's expected profit, all settled bets."""
+def totals_lines(totals: Optional[Tally], untracked: Optional[Untracked] = None) -> Text:
+    """Fees paid, the model's expected profit, and -- when the account holds
+    realized money no ledger row covers -- the reconciliation to it.
+
+    `net` here is the ACCOUNT's realized P&L, so this line can be checked
+    straight against the balance. The tracked-bets figure is still shown
+    beside it; they differ only by `untracked`.
+    """
     if totals is None or not totals.n:
         return Text("")
+    extra = untracked.net if untracked and untracked.n else 0.0
+    net = totals.net + extra
     t = Text(f"{'fees':<5}", style=MUTED)
     t.append(f"-{totals.fees:.2f}", style=RED if totals.fees else DIM)
-    t.append(f"  net {totals.net:+.2f}", style=GREEN if totals.net > 0 else RED)
+    t.append(f"  net {net:+.2f}", style=GREEN if net > 0 else RED)
+    if extra:
+        t.append(f"\n{'bets':<5}", style=MUTED)
+        t.append(f"{totals.net:+.2f}", style=DIM)
+        t.append(f"  untracked {extra:+.2f}", style=DIM)
+        t.append(f" ({untracked.n})", style=DIM)
     t.append(f"\n{'exp':<5}", style=MUTED)
     t.append(f"{totals.expected:+.2f}", style=CYAN)
     vs = totals.vs_expected
@@ -1724,7 +1765,7 @@ class DashboardApp(App):
         overall = record_card(acct.overall, acct.overall_by_sport)
         if acct.totals is not None and acct.totals.n:
             overall.append("\n")
-            overall.append_text(totals_lines(acct.totals))
+            overall.append_text(totals_lines(acct.totals, acct.untracked))
         self._set("kpi_overall", overall)
         self._set("kpi_drawdown", drawdown_card(acct.drawdown))
 
@@ -2018,11 +2059,26 @@ class DashboardApp(App):
         self._sync_columns(table, REC_COLUMNS)
         table.clear()
         rows = rec_table(self._account.graded)
+        sim = sim_table(self._account.shadow_graded)
         table.border_title = ("RECORD BY MARKET — all settled bets · profit is before fees · "
-                              "EXPECTED = the model's edge x contracts · vs EXP = profit - expected")
+                              "EXPECTED = the model's edge x contracts · vs EXP = profit - expected"
+                              + (" · SIMULATED = shadow bets, no money, not in ALL SPORTS"
+                                 if sim else ""))
+        self._add_rec_rows(table, rows)
+        if sim:
+            blank = [Text("") for _ in REC_COLUMNS]
+            table.add_row(*blank)
+            table.add_row(Text("SIMULATED · no money at risk", style="bold " + SIM),
+                          *blank[1:])
+            self._add_rec_rows(table, sim, simulated=True)
+
+    def _add_rec_rows(self, table, rows, simulated: bool = False) -> None:
         for level, label, t in rows:
+            if level == "sim":
+                continue      # the section header above stands in for the total
             name = {"all": Text(label, style="bold " + YELLOW),
-                    "sport": Text(label, style="bold " + WHITE),
+                    "sport": Text(label + (" (sim)" if simulated else ""),
+                                  style="bold " + (SIM if simulated else WHITE)),
                     "kind": Text("  " + label, style=MUTED)}[level]
             table.add_row(
                 name,
@@ -2203,6 +2259,9 @@ def _selftest() -> int:
               f"@{b.get('entry_price')} x{b.get('contracts')} profit={b['_profit']:+.2f} "
               f"fee={b['_fee']:.4f} net={b['_net']:+.2f} roi={b['_roi']} "
               f"book={book_label(b.get('_src', ''))}")
+    for level, label, t in sim_table(acct.shadow_graded):
+        print(f"  sim {level:5} {label:10} {t.wins}-{t.losses} staked={t.staked:.2f} "
+              f"profit={t.profit:+.2f} net={t.net:+.2f}")
     if acct.error:
         print(f"  errors: {acct.error}")
     return 0

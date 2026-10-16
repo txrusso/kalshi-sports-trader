@@ -24,7 +24,7 @@ from output.live_dashboard import (  # noqa: E402
     name_column_width, pending_bets, record_card, record_text, short_source,
     sport_records, _mode_from_args, signed, truncate,
     bet_eta, bet_fee, bet_side_prob, book_label, settled_bets, settled_summary, fmt_clock,
-    game_key, group_recs, placed_events, profit_curves, rec_start, account_money, money_card,
+    game_key, group_recs, placed_events, profit_curves, rec_start, account_money, money_card, total_roi,
     bet_on, bet_on_cell, short_headline,
 )
 from engine.account_summary import _grade          # noqa: E402
@@ -689,9 +689,23 @@ class AccountMoney(unittest.TestCase):
 
     def test_card_lines(self):
         lines = money_card(22.87, 22.15, 1.38).plain.splitlines()
-        self.assertEqual(lines, ["Balance: $22.87", "Cash:    $22.15", "Exposed: $1.38"])
+        self.assertEqual(lines, ["Balance: $22.87", "Cash:    $22.15", "Exposed: $1.38",
+                                 "ROI:     +14.4%"])
         self.assertEqual(money_card(None, None, None).plain, "unavailable")
         self.assertIn("Exposed: n/a", money_card(22.15, 22.15, None).plain)
+        self.assertIn("ROI:     n/a", money_card(None, 22.15, None).plain)
+        self.assertIn("ROI:     -10.0%", money_card(18.0, 18.0, 0).plain)
+
+    def test_compact_card_fits_narrow(self):
+        lines = money_card(35.17, 35.17, 0.0, compact=True).plain.splitlines()
+        self.assertEqual(lines, ["Bal  $35.17", "Cash $35.17", "Exp  $0.00", "ROI  +75.9%"])
+        self.assertTrue(all(len(l) < 15 for l in lines))
+
+    def test_total_roi(self):
+        self.assertAlmostEqual(total_roi(35.17), 0.7585)
+        self.assertEqual(total_roi(20.0), 0.0)
+        self.assertIsNone(total_roi(None))
+        self.assertIsNone(total_roi(30.0, deposited=0))
 
 
 

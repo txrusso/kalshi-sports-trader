@@ -886,20 +886,53 @@ def sport_header(sport: str, n: int) -> Text:
     return t
 
 
+# Net capital put into the account: $20 initial; the $30 added 2026-09-01 was
+# withdrawn 2026-09-13. NOT settings.bankroll_usd -- that is the sizing
+# fallback the loop trades on, and it still reads $50. Change this if money is
+# deposited or withdrawn.
+DEPOSITED_USD = 20.0
+
+
+def total_roi(balance: Optional[float], deposited: float = DEPOSITED_USD) -> Optional[float]:
+    """Whole-account return on deposited capital: (balance - deposited) / deposited."""
+    if balance is None or deposited <= 0:
+        return None
+    return (balance - deposited) / deposited
+
+
+# Full labels need 15 columns ("Balance: $35.17"); below that every line wraps
+# and the last one is pushed out of the fixed-height card.
+MONEY_CARD_FULL_WIDTH = 15
+
+
 def money_card(balance: Optional[float], cash: Optional[float],
-               exposed: Optional[float]) -> Text:
-    """Balance / Cash / Exposed, labels aligned, each value or 'n/a'."""
+               exposed: Optional[float], compact: bool = False) -> Text:
+    """Balance / Cash / Exposed / ROI, labels aligned, each value or 'n/a'.
+
+    compact=True uses short labels (Bal/Cash/Exp/ROI, 11 columns) for a narrow
+    window, so each line still fits on one row.
+
+    ROI is total return on DEPOSITED_USD, off the balance (so it includes
+    open positions at Kalshi's mark), and so matches the account, not the ledger.
+    """
     if balance is None and cash is None:
         return Text("unavailable", style=DIM)
     t = Text()
-    for i, (label, value, style) in enumerate((
-            ("Balance", balance, GREEN), ("Cash", cash, "bold " + WHITE),
-            ("Exposed", exposed, YELLOW))):
+    pad = 5 if compact else 9
+    for i, (label, short, value, style) in enumerate((
+            ("Balance", "Bal", balance, GREEN), ("Cash", "Cash", cash, "bold " + WHITE),
+            ("Exposed", "Exp", exposed, YELLOW))):
         if i:
             t.append("\n")
-        t.append(f"{label + ':':<9}", style=MUTED)
+        t.append(f"{(short if compact else label + ':'):<{pad}}", style=MUTED)
         t.append(f"${value:.2f}" if value is not None else "n/a",
                  style=style if value is not None else DIM)
+    roi = total_roi(balance)
+    t.append(f"\n{('ROI' if compact else 'ROI:'):<{pad}}", style=MUTED)
+    if roi is None:
+        t.append("n/a", style=DIM)
+    else:
+        t.append(f"{roi:+.1%}", style=GREEN if roi > 0 else RED if roi < 0 else WHITE)
     return t
 
 
@@ -1438,6 +1471,9 @@ class DashboardApp(App):
         width: 1fr; height: 8; content-align: center middle;
         border: round $primary; padding: 0 1;
     }
+    /* 11 cols of compact text + padding + border: never narrower than that,
+       or the ROI line wraps out of the bottom of the card. */
+    #kpi_balance { min-width: 15; }
     #kpi_overall { width: 1.4fr; }
     #kpi_scan { width: 0.8fr; }
     #kpi_next { width: 2.1fr; content-align: left middle; }
@@ -1641,6 +1677,10 @@ class DashboardApp(App):
         self.render_kpis()
         self.render_cal_table()
 
+    def on_resize(self, event) -> None:
+        # The ACCOUNT card picks full or short labels from its own width.
+        self.call_after_refresh(self.render_kpis)
+
     def action_force_refresh(self) -> None:
         self.reload_scan(force=True)
         self.refresh_account()
@@ -1746,7 +1786,13 @@ class DashboardApp(App):
 
     def render_kpis(self) -> None:
         acct = self._account
-        self._set("kpi_balance", money_card(acct.balance, acct.cash, acct.exposed))
+        try:
+            width = self.query_one("#kpi_balance", KpiCard).content_region.width
+        except Exception:
+            width = 0
+        self._set("kpi_balance", money_card(
+            acct.balance, acct.cash, acct.exposed,
+            compact=0 < width < MONEY_CARD_FULL_WIDTH))
         if self._show_yesterday:
             day = record_card(acct.yesterday, acct.yesterday_by_sport)
             day.append("\n")

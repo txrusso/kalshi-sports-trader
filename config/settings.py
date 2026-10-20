@@ -175,8 +175,30 @@ class Settings:
     spread_min_mid: float = 0.12          # only consider near-the-money spread rungs
     spread_max_mid: float = 0.88          #   (same rationale as totals_min_mid/max_mid)
     market_status: str = "open"          # only scan open markets
-    min_market_volume: int = 50          # ignore illiquid markets (contracts traded)
-    min_open_interest: int = 50
+    # NO LIQUIDITY FLOOR, AND THAT IS A MEASURED CHOICE (2026-10-06).
+    # `min_market_volume = 50` / `min_open_interest = 50` lived here for months,
+    # commented "ignore illiquid markets", and were read by NOTHING -- the
+    # scanner uses volume+OI only to RANK which events to deep-scan. Rather than
+    # wire them up, the filter was measured against all 298 real bets (each
+    # joined to the snapshot row for its own ticker at the cycle it was placed
+    # on; see backtest/liquidity_floor_20261006.txt):
+    #
+    #   min_volume    blocks          blocked ROI     kept ROI
+    #       25         5 (2%)   4-1      +12.8%        +1.8%
+    #       50         7 (2%)   6-1      +13.6%        +1.7%
+    #      100         8 (3%)   7-1      +18.2%        +1.5%
+    #      250        10 (3%)   9-1      +18.0%        +1.5%
+    #     1000        19 (6%)  15-4      +10.2%        +1.5%
+    #     5000        68(23%)  50-18      +4.6%        +1.2%
+    #
+    # At the configured 50/50 it blocks 7 bets that went 6-1 for +$1.28 net --
+    # 19% of ALL profit to date ($6.67). The gradient is monotone and points the
+    # wrong way at every threshold tested: the thinner the market, the better the
+    # bets in it did, which is not crazy -- an untraded quote has not yet
+    # absorbed anyone's information, so a model edge there is likelier to be real
+    # than already priced. n=7 means +13.6% is noise, but the burden was on the
+    # filter to show it saves money and it shows the opposite.
+    # Do not re-add one without re-running that measurement.
     max_deep_markets: int = 1500         # cap markets deep-scanned/cycle (bounds API load).
                                          # Raised 50 -> 100 on 2026-09-02: with MLB and NFL
                                          # both live, the 50 cap was being exhausted by rank

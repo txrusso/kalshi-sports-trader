@@ -1,0 +1,121 @@
+
+============================================================================================================
+ALL BETS WITH A LIQUIDITY READ AT BET TIME  (n=298 of 298)
+============================================================================================================
+all                          170-125 ( 58%)  wager $ 320.71  gross  +12.86  net of fees   +6.67  ROI   +2.1%
+
+A FLOOR ON *VOLUME* (contracts traded in the market at the moment we bet)
+------------------------------------------------------------------------------------------------------------
+
+  min_volume = 1:  blocks 2/298 bets (1%)
+    BLOCKED (what you'd lose)      1-1   ( 50%)  wager $   1.35  gross   -0.79  net of fees   -0.79  ROI  -58.7%
+    KEPT (what you'd keep)       169-124 ( 58%)  wager $ 319.36  gross  +13.64  net of fees   +7.46  ROI   +2.3%
+
+  min_volume = 10:  blocks 3/298 bets (1%)
+    BLOCKED (what you'd lose)      2-1   ( 67%)  wager $   2.51  gross   -0.34  net of fees   -0.35  ROI  -14.0%
+    KEPT (what you'd keep)       168-124 ( 58%)  wager $ 318.20  gross  +13.19  net of fees   +7.02  ROI   +2.2%
+
+  min_volume = 25:  blocks 5/298 bets (2%)
+    BLOCKED (what you'd lose)      4-1   ( 80%)  wager $   7.01  gross   +0.96  net of fees   +0.90  ROI  +12.8%
+    KEPT (what you'd keep)       166-124 ( 57%)  wager $ 313.70  gross  +11.89  net of fees   +5.77  ROI   +1.8%
+
+  min_volume = 50:  blocks 7/298 bets (2%)
+    BLOCKED (what you'd lose)      6-1   ( 86%)  wager $   9.38  gross   +1.36  net of fees   +1.28  ROI  +13.6%
+    KEPT (what you'd keep)       164-124 ( 57%)  wager $ 311.32  gross  +11.50  net of fees   +5.39  ROI   +1.7%
+
+  min_volume = 100:  blocks 8/298 bets (3%)
+    BLOCKED (what you'd lose)      7-1   ( 88%)  wager $  10.80  gross   +2.06  net of fees   +1.96  ROI  +18.2%
+    KEPT (what you'd keep)       163-124 ( 57%)  wager $ 309.90  gross  +10.80  net of fees   +4.70  ROI   +1.5%
+
+  min_volume = 250:  blocks 10/298 bets (3%)
+    BLOCKED (what you'd lose)      9-1   ( 90%)  wager $  11.62  gross   +2.19  net of fees   +2.09  ROI  +18.0%
+    KEPT (what you'd keep)       161-124 ( 56%)  wager $ 309.09  gross  +10.66  net of fees   +4.58  ROI   +1.5%
+
+  min_volume = 500:  blocks 11/298 bets (4%)
+    BLOCKED (what you'd lose)      9-2   ( 82%)  wager $  12.88  gross   +0.93  net of fees   +0.81  ROI   +6.3%
+    KEPT (what you'd keep)       161-123 ( 57%)  wager $ 307.83  gross  +11.92  net of fees   +5.85  ROI   +1.9%
+
+  min_volume = 1000:  blocks 19/298 bets (6%)
+    BLOCKED (what you'd lose)     15-4   ( 79%)  wager $  22.36  gross   +2.53  net of fees   +2.27  ROI  +10.2%
+    KEPT (what you'd keep)       155-121 ( 56%)  wager $ 298.35  gross  +10.32  net of fees   +4.39  ROI   +1.5%
+
+  min_volume = 5000:  blocks 68/298 bets (23%)
+    BLOCKED (what you'd lose)     50-18  ( 74%)  wager $  82.51  gross   +4.86  net of fees   +3.79  ROI   +4.6%
+    KEPT (what you'd keep)       120-107 ( 53%)  wager $ 238.20  gross   +7.99  net of fees   +2.88  ROI   +1.2%
+
+A FLOOR ON *OPEN INTEREST*
+------------------------------------------------------------------------------------------------------------
+
+  min_oi = 1:  blocks 2/298 bets (1%)
+    BLOCKED                        1-1   ( 50%)  wager $   1.35  gross   -0.79  net of fees   -0.79  ROI  -58.7%
+    KEPT                         169-124 ( 58%)  wager $ 319.36  gross  +13.64  net of fees   +7.46  ROI   +2.3%
+
+  min_oi = 10:  blocks 3/298 bets (1%)
+    BLOCKED                        2-1   ( 67%)  wager $   2.51  gross   -0.34  net of fees   -0.35  ROI  -14.0%
+    KEPT                         168-124 ( 58%)  wager $ 318.20  gross  +13.19  net of fees   +7.02  ROI   +2.2%
+
+  min_oi = 25:  blocks 5/298 bets (2%)
+    BLOCKED                        4-1   ( 80%)  wager $   7.01  gross   +0.96  net of fees   +0.90  ROI  +12.8%
+    KEPT                         166-124 ( 57%)  wager $ 313.70  gross  +11.89  net of fees   +5.77  ROI   +1.8%
+
+  min_oi = 50:  blocks 7/298 bets (2%)
+    BLOCKED                        6-1   ( 86%)  wager $   9.38  gross   +1.36  net of fees   +1.28  ROI  +13.6%
+    KEPT                         164-124 ( 57%)  wager $ 311.32  gross  +11.50  net of fees   +5.39  ROI   +1.7%
+
+  min_oi = 100:  blocks 8/298 bets (3%)
+    BLOCKED                        7-1   ( 88%)  wager $  10.80  gross   +2.06  net of fees   +1.96  ROI  +18.2%
+    KEPT                         163-124 ( 57%)  wager $ 309.90  gross  +10.80  net of fees   +4.70  ROI   +1.5%
+
+  min_oi = 250:  blocks 10/298 bets (3%)
+    BLOCKED                        9-1   ( 90%)  wager $  11.62  gross   +2.19  net of fees   +2.09  ROI  +18.0%
+    KEPT                         161-124 ( 56%)  wager $ 309.09  gross  +10.66  net of fees   +4.58  ROI   +1.5%
+
+  min_oi = 500:  blocks 11/298 bets (4%)
+    BLOCKED                        9-2   ( 82%)  wager $  12.88  gross   +0.93  net of fees   +0.81  ROI   +6.3%
+    KEPT                         161-123 ( 57%)  wager $ 307.83  gross  +11.92  net of fees   +5.85  ROI   +1.9%
+
+  min_oi = 1000:  blocks 19/298 bets (6%)
+    BLOCKED                       15-4   ( 79%)  wager $  22.36  gross   +2.53  net of fees   +2.27  ROI  +10.2%
+    KEPT                         155-121 ( 56%)  wager $ 298.35  gross  +10.32  net of fees   +4.39  ROI   +1.5%
+
+  min_oi = 5000:  blocks 75/298 bets (25%)
+    BLOCKED                       55-20  ( 73%)  wager $  91.63  gross   +5.96  net of fees   +4.74  ROI   +5.2%
+    KEPT                         115-105 ( 52%)  wager $ 229.07  gross   +6.90  net of fees   +1.93  ROI   +0.8%
+
+BOTH, AT THE CONFIGURED (DEAD) VALUES  volume>=50 AND oi>=50
+------------------------------------------------------------------------------------------------------------
+BLOCKED                        6-1   ( 86%)  wager $   9.38  gross   +1.36  net of fees   +1.28  ROI  +13.6%
+KEPT                         164-124 ( 57%)  wager $ 311.32  gross  +11.50  net of fees   +5.39  ROI   +1.7%
+
+DISTRIBUTION OF LIQUIDITY AT BET TIME
+------------------------------------------------------------------------------------------------------------
+  volume         min          0   p10       1734   p25       5490   median      24290   p75     129109   max      8475492
+  open interest  min          0   p10       1728   p25       4991   median      21731   p75     117603   max      7905866
+
+BY SPORT / MARKET KIND: how many bets sat below 50 contracts of volume
+------------------------------------------------------------------------------------------------------------
+  mlb:total         139 bets,   7 below 50 volume (5%)
+  mlb:winner         67 bets,   0 below 50 volume (0%)
+  nfl:spread         35 bets,   0 below 50 volume (0%)
+  nfl:total          33 bets,   0 below 50 volume (0%)
+  nfl:winner         12 bets,   0 below 50 volume (0%)
+  nhl:total           6 bets,   0 below 50 volume (0%)
+  nhl:winner          6 bets,   0 below 50 volume (0%)
+
+THE LEAST-LIQUID BETS WE ACTUALLY PLACED (by volume at bet time)
+------------------------------------------------------------------------------------------------------------
+  vol         0  oi         0  2026-09-26T23:16  KXMLBTOTAL-26SEP261910CLEKC-12     NO  @0.74 x 1.18  LOST
+  vol         0  oi         0  2026-09-27T18:54  KXMLBTOTAL-26SEP271510STLMIL-4     YES @0.85 x 0.56  WON 
+  vol         6  oi         6  2026-09-19T22:41  KXMLBTOTAL-26SEP191905TORTEX-11    NO  @0.72 x 1.61  WON 
+  vol        11  oi        11  2026-09-06T17:01  KXMLBTOTAL-26SEP061340SFNYM-13     NO  @0.82 x 3.97  WON 
+  vol        13  oi        13  2026-09-27T18:44  KXMLBTOTAL-26SEP271505NYMWSH-15    NO  @0.68 x 1.83  WON 
+  vol        34  oi        34  2026-09-25T23:16  KXMLBTOTAL-26SEP251840PITDET-4     YES @0.86 x 1.79  WON 
+  vol        43  oi        43  2026-09-20T19:54  KXMLBTOTAL-26SEP201607MINLAA-5     YES @0.85 x 0.98  WON 
+  vol        84  oi        84  2026-09-25T23:46  KXMLBTOTAL-26SEP252010TEXMIN-6     YES @0.67 x 2.12  WON 
+  vol       146  oi       146  2026-09-20T19:54  KXMLBTOTAL-26SEP201610NYYAZ-5      YES @0.85 x 0.51  WON 
+  vol       189  oi       189  2026-09-27T00:46  KXMLBTOTAL-26SEP262040AZSD-4       YES @0.87 x 0.44  WON 
+  vol       468  oi       420  2026-09-09T19:04  KXMLBTOTAL-26SEP091545STLSF-10     NO  @0.63 x 2.00  LOST
+  vol       508  oi       508  2026-09-22T22:22  KXMLBTOTAL-26SEP221840WSHDET-6     YES @0.75 x 1.22  LOST
+  vol       531  oi       524  2026-09-05T22:01  KXMLBTOTAL-26SEP051805ATLPHI-13    NO  @0.80 x 2.04  WON 
+  vol       578  oi       578  2026-09-20T19:54  KXNFLTOTAL-26SEP20LVLAC-48         NO  @0.63 x 1.86  WON 
+  vol       630  oi       630  2026-09-27T19:44  KXNFLTOTAL-26SEP27MINTB-49         NO  @0.68 x 1.29  WON 

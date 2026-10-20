@@ -64,18 +64,16 @@ def _account_snapshot(settings: Settings):
 def _real_bets(clients: dict):
     """Real bets (both ledgers, never-filled orders dropped -- see
     engine/real_bets.py) split into settled (with won/pnl) and pending."""
-    from engine.real_bets import load_real_bets
+    from engine.real_bets import grade, load_real_bets
     bets = load_real_bets()
     if not bets:
         return [], []
     outcomes = resolve_outcomes({b["ticker"] for b in bets}, clients)
     settled, pending = [], []
     for b in bets:
-        if b["ticker"] in outcomes:
-            yes_won = outcomes[b["ticker"]]
-            won = yes_won if b["side"] == "YES" else (not yes_won)
-            ct = b.get("contracts") or 0
-            pnl = (1 - b["entry_price"]) * ct if won else -b["entry_price"] * ct
+        g = grade(b, outcomes)
+        if g is not None:
+            won, pnl = g
             settled.append({**b, "won": won, "pnl_usd": round(pnl, 4)})
         else:
             pending.append(b)

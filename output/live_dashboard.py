@@ -39,6 +39,7 @@ from rich.text import Text
 
 from config.settings import DEFAULTS, EASTERN, OUTPUT_DIR
 from config.sports import market_kind, sport_of
+from engine.real_bets import grade
 # The book/trades/oi component scores and the calibration multiplier exist in
 # full ONLY inside the pre-built `rationale` string: signals/money_flow.py's
 # debug dict keeps the raw inputs and, in cross-market mode, the un-blended
@@ -554,7 +555,7 @@ def pending_bets(bets: list[dict], outcomes: dict[str, bool]) -> list[dict]:
     now = datetime.now(timezone.utc)
     out = []
     for b in bets:
-        if outcomes.get(b.get("ticker")) is not None:
+        if grade(b, outcomes) is not None:
             continue
         start = parse_utc(b.get("first_pitch"))
         if start is None or start < now - timedelta(hours=36):
@@ -578,17 +579,16 @@ def settled_bets(bets: list[dict], outcomes: dict[str, bool],
     now = now or datetime.now(timezone.utc)
     out = []
     for b in bets:
-        yes_won = outcomes.get(b.get("ticker"))
-        if yes_won is None:
+        g = grade(b, outcomes)
+        if g is None:
             continue
         start = parse_utc(b.get("first_pitch"))
         if start is None or start < now - timedelta(days=days):
             continue
-        won = yes_won if b.get("side") == "YES" else not yes_won
+        won, profit = g
         price = float(b.get("entry_price") or 0)
         contracts = float(b.get("contracts") or 0)
         wager = float(b.get("wager_usd") or price * contracts)
-        profit = ((1 - price) if won else -price) * contracts
         fee = bet_fee(b)
         row = {**b, "_start": start, "_won": won, "_profit": profit, "_fee": fee,
                "_net": profit - fee, "_wager": wager,
@@ -624,13 +624,11 @@ def profit_curves(bets: list[dict], outcomes: dict[str, bool]
     """
     graded = []
     for b in bets:
-        yes_won = outcomes.get(b.get("ticker"))
+        g = grade(b, outcomes)
         start = parse_utc(b.get("first_pitch"))
-        if yes_won is None or start is None:
+        if g is None or start is None:
             continue
-        won = yes_won if b.get("side") == "YES" else not yes_won
-        price = float(b.get("entry_price") or 0)
-        pnl = ((1 - price) if won else -price) * float(b.get("contracts") or 0)
+        pnl = g[1]
         graded.append((start, sport_of(b.get("ticker") or "").upper(), pnl))
     graded.sort(key=lambda g: g[0])
 

@@ -145,15 +145,26 @@ def _ticker_fills(client) -> dict:
         log.warning("Could not fetch fills; grading rows at their recorded price.",
                     exc_info=True)
         return {}
+    # Oldest first: the first fill on a ticker fixes which side we HOLD, and
+    # any later fill on the other side is that position being cashed out.
+    def _when(f):
+        return str(f.get("created_time") or f.get("ts") or "")
     agg: dict = {}
-    for f in fills:
+    for f in sorted(fills, key=_when):
         # Do NOT filter on `action`. Buying NO is submitted as a YES ASK (see
         # CLAUDE.md's "Live order execution"), so Kalshi records a NO bet as
         # action="sell" with outcome_side="no" -- filtering to action=="buy"
         # silently drops every NO-side bet and leaves it priced at its limit.
-        # This agent never sells to close; it holds to settlement, so every
-        # fill on the account is a position being opened. `outcome_side` is
-        # the field that says which side, and it is what we key on.
+        # `outcome_side` is the field that says which side, and it is what we
+        # key on.
+        #
+        # EARLY EXITS (2026-10-18). The agent itself never sells to close, but
+        # the user can, by hand -- the first was the HOU@JAC Under 42.5, bought
+        # NO at 0.52 and cashed out at 0.05 mid-game. Kalshi records that exit
+        # as action="sell", book_side="bid", outcome_side="yes": the OPPOSITE
+        # outcome_side to the position, carrying the held side's exit price in
+        # its own price field (no_price_dollars=0.05). Summing it in as another
+        # opening fill turned 2.8 NO @ 0.52 into 5.6 @ ~0.73 held to settlement.
         t = f.get("ticker") or f.get("market_ticker")
         try:
             ct = float(f.get("count_fp") or 0)
@@ -162,17 +173,24 @@ def _ticker_fills(client) -> dict:
         if not t or ct <= 0:
             continue
         side = (f.get("outcome_side") or f.get("side") or "yes").lower()
-        key = "no_price_dollars" if side == "no" else "yes_price_dollars"
+        a = agg.setdefault(t, {"side": side, "contracts": 0.0, "cost": 0.0, "fees": 0.0,
+                               "closed": 0.0, "proceeds": 0.0})
+        key = "no_price_dollars" if a["side"] == "no" else "yes_price_dollars"
         try:
-            px = float(f.get(key) or 0)
+            px = float(f.get(key) or 0)   # price of the side we HOLD
         except (TypeError, ValueError):
             continue
-        a = agg.setdefault(t, {"contracts": 0.0, "cost": 0.0, "fees": 0.0})
-        a["contracts"] += ct
-        a["cost"] += px * ct
+        if side == a["side"]:
+            a["contracts"] += ct
+            a["cost"] += px * ct
+        else:
+            a["closed"] += ct
+            a["proceeds"] += px * ct
         a["fees"] += float(f.get("fee_cost") or 0)
     for a in agg.values():
         a["price"] = a["cost"] / a["contracts"] if a["contracts"] else 0.0
+        a["closed"] = min(a["closed"], a["contracts"])
+        a["exit_price"] = a["proceeds"] / a["closed"] if a["closed"] else None
     _TICKER_FILLS, _TICKER_FILLS_AT = agg, time.monotonic()
     return agg
 
@@ -191,8 +209,44 @@ def apply_real_fill(bet: dict, got: dict) -> dict:
         out["contracts"] = ct
     out["wager_usd"] = round(price * ct, 4)
     out["fees_usd"] = round(float(got["fees"]), 6)   # real fee, not the model
+    if got.get("closed"):
+        # Cashed out early (some or all of it). `contracts` stays what was
+        # BOUGHT; grade() books the closed part at its exit price.
+        out["closed_contracts"] = round(float(got["closed"]), 2)
+        out["exit_price"] = round(float(got["exit_price"]), 4)
     out["_repriced"] = True
     return out
+
+
+def grade(bet: dict, outcomes: dict) -> Optional[tuple[bool, float]]:
+    """(won, gross P&L in dollars) for one real bet, or None while it is
+    still open. The ONE place a real bet's result is decided -- every report
+    goes through it so they cannot disagree.
+
+    A bet cashed out in full is final the moment it is sold, whatever the game
+    later does: P&L is (exit - entry) per contract, and it counts as a win
+    only if it sold for more than it cost. A partial cash-out books the sold
+    part the same way and grades the rest at settlement; its W/L is the sign
+    of the combined P&L. Fees are NOT included (`fees_usd` already covers the
+    opening and the closing fills) -- same gross convention as before.
+    """
+    price = float(bet.get("entry_price") or 0)
+    ct = float(bet.get("contracts") or 0)
+    closed = min(float(bet.get("closed_contracts") or 0), ct)
+    exit_pnl = closed * (float(bet.get("exit_price") or 0) - price) if closed else 0.0
+    held = ct - closed
+    if closed and held <= 1e-9:
+        return exit_pnl > 0, exit_pnl
+    yes_won = outcomes.get(bet.get("ticker"))
+    if yes_won is None:
+        return None
+    won = yes_won if bet.get("side") == "YES" else not yes_won
+    pnl = exit_pnl + held * ((1 - price) if won else -price)
+    return (pnl > 0 if closed else won), pnl
+
+
+def is_settled(bet: dict, outcomes: dict) -> bool:
+    return grade(bet, outcomes) is not None
 
 
 def load_real_bets(client=None, include_unfilled: bool = False) -> list[dict]:

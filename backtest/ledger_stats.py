@@ -31,7 +31,7 @@ from typing import Callable, Optional
 
 from config.sports import market_kind, sport_of
 from data.games import build_clients, resolve_outcomes
-from engine.real_bets import load_real_bets
+from engine.real_bets import grade, is_settled, load_real_bets
 
 
 def _graded_rows(sport: Optional[str] = None) -> list[dict]:
@@ -45,9 +45,8 @@ def _graded_rows(sport: Optional[str] = None) -> list[dict]:
         return []
     outcomes = resolve_outcomes({b["ticker"] for b in bets}, build_clients())
     rows = []
-    for b in sorted((x for x in bets if x["ticker"] in outcomes), key=lambda x: x["first_pitch"]):
-        yes_won = outcomes[b["ticker"]]
-        won = yes_won if b["side"] == "YES" else (not yes_won)
+    for b in sorted((x for x in bets if is_settled(x, outcomes)), key=lambda x: x["first_pitch"]):
+        won, net = grade(b, outcomes)
         ct = b.get("contracts") or 0
         price = b["entry_price"]
         rows.append({
@@ -55,8 +54,8 @@ def _graded_rows(sport: Optional[str] = None) -> list[dict]:
             "won": won,
             "contracts": ct,
             "price": price,
-            "per_contract": (1 - price) if won else -price,
-            "net": ((1 - price) if won else -price) * ct,
+            "per_contract": net / ct if ct else 0.0,
+            "net": net,
             "wager": price * ct,
             # Model's probability for the side we actually took (ledger stores P(YES)).
             "fair_side": (b["fair_prob"] if b["side"] == "YES" else 1 - b["fair_prob"])

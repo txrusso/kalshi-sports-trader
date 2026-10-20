@@ -25,6 +25,7 @@ from typing import Iterable, Optional
 
 from config.settings import EASTERN
 from config.sports import market_kind, sport_of
+from engine.real_bets import grade
 
 SPORT_ORDER = ["MLB", "NFL", "NBA", "NHL"]
 
@@ -64,11 +65,11 @@ def graded_rows(bets: Iterable[dict], outcomes: dict[str, bool]) -> list[dict]:
     for b in bets:
         if b.get("_nofill"):
             continue
-        yes_won = outcomes.get(b.get("ticker"))
-        if yes_won is None:
+        g = grade(b, outcomes)
+        if g is None:
             continue
         ticker = b.get("ticker") or ""
-        won = yes_won if b.get("side") == "YES" else not yes_won
+        won, profit = g
         price = float(b.get("entry_price") or 0)
         ct = float(b.get("contracts") or 0)
         fair = b.get("fair_prob")
@@ -84,7 +85,7 @@ def graded_rows(bets: Iterable[dict], outcomes: dict[str, bool]) -> list[dict]:
             "price": price,
             "contracts": ct,
             "wager": price * ct,
-            "profit": ((1 - price) if won else -price) * ct,
+            "profit": profit,
             "fee": bet_fee(b),
             "expected": float(edge) / 100.0 * ct if edge is not None else None,
             "p_side": p_side,
@@ -273,7 +274,7 @@ def today_risk(bets: Iterable[dict], outcomes: dict[str, bool], today: str, game
                       * float(b.get("contracts") or 0))
         r.staked += wager
         r.n_bets += 1
-        if outcomes.get(b.get("ticker")) is None:
+        if grade(b, outcomes) is None:
             r.open_risk += wager
             r.n_open += 1
     return r

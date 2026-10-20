@@ -22,7 +22,7 @@ from datetime import datetime
 from backtest.evaluate import _game_date
 from config.settings import EASTERN
 from data.games import resolve_outcomes
-from engine.real_bets import load_real_bets
+from engine.real_bets import grade, load_real_bets
 from kalshi.client import KalshiClient
 
 log = logging.getLogger("engine.account_summary")
@@ -33,11 +33,11 @@ def _grade(bets: list[dict], outcomes: dict[str, bool]) -> tuple[int, int, float
     wins = losses = 0
     net = 0.0
     for b in bets:
-        yes_won = outcomes.get(b["ticker"])
-        if yes_won is None:
+        g = grade(b, outcomes)
+        if g is None:
             continue
-        won = yes_won if b["side"] == "YES" else (not yes_won)
-        net += ((1 - b["entry_price"]) if won else -b["entry_price"]) * (b.get("contracts") or 0)
+        won, pnl = g
+        net += pnl
         wins += int(won)
         losses += int(not won)
     return wins, losses, net

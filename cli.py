@@ -434,7 +434,7 @@ def cmd_loop(args) -> None:
 def cmd_settle(args) -> None:
     # Both ledgers (all real money -- paper = placed by hand, live = placed by the
     # loop), with live orders that never filled dropped. See engine/real_bets.py.
-    from engine.real_bets import load_real_bets
+    from engine.real_bets import grade, is_settled, load_real_bets
     from backtest.evaluate import _game_date
     from data.games import resolve_outcomes
     from config.sports import sport_of, market_kind
@@ -462,8 +462,8 @@ def cmd_settle(args) -> None:
             print(f"(cleared saved model inputs for {removed} settled bet(s))")
     except Exception:
         pass
-    settled = [b for b in bets if b["ticker"] in outcomes]
-    pending = [b for b in bets if b["ticker"] not in outcomes]
+    settled = [b for b in bets if is_settled(b, outcomes)]
+    pending = [b for b in bets if not is_settled(b, outcomes)]
 
     print(f"\n=== LEDGER (live + manual): {len(bets)} bets ({len(settled)} settled, {len(pending)} pending) ===")
     if settled:
@@ -482,10 +482,9 @@ def cmd_settle(args) -> None:
                 kind, {"n": 0, "w": 0, "pnl": 0.0, "staked": 0.0, "dollar": 0.0})
 
         for b in sorted(settled, key=lambda x: x["first_pitch"]):
-            yes_won = outcomes[b["ticker"]]
-            won = yes_won if b["side"] == "YES" else (not yes_won)
-            per = (1 - b["entry_price"]) if won else -b["entry_price"]
+            won, gross = grade(b, outcomes)
             ct = b.get("contracts") or 0
+            per = gross / ct if ct else 0.0
             dollar += per * ct
             pnl += per
             staked += b["entry_price"]
@@ -496,7 +495,8 @@ def cmd_settle(args) -> None:
             st["pnl"] += per
             st["staked"] += b["entry_price"]
             st["dollar"] += per * ct
-            print(f"{'WIN ' if won else 'LOSS':<7}{b['label']:<34}{b['entry_price']:>6.2f}"
+            result = ("CASHWIN" if won else "CASHOUT") if b.get("closed_contracts") else ("WIN " if won else "LOSS")
+            print(f"{result:<7}{b['label']:<34}{b['entry_price']:>6.2f}"
                   f"{ct:>5}{per*ct:>9.2f}  {b['ticker']}")
         n = len(settled)
         print("-" * 82)

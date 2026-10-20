@@ -20,7 +20,7 @@ Run it in Windows Terminal (any width; the tables scroll horizontally):
 
     .venv\\Scripts\\python.exe -m output.live_dashboard     (or scripts\\run_dashboard.bat)
 
-Keys: q quit, r force refresh, t today/yesterday; 1-6 (or p / s / g) switch the tabs:
+Keys: q quit, r force refresh, t cycle today / yesterday / last 3 / last 7 days; 1-6 (or p / s / g) switch the tabs:
 Pending, Settled, Cum PnL, Model, Rec Table, Cal Table.
 """
 from __future__ import annotations
@@ -103,6 +103,43 @@ class LoopInfo:
     source: str = "defaults"
 
 
+# The TODAY card's views, in the order `t` / a click cycles through them:
+# (key, card title, number of days, how many days back the window ends).
+# "Last N days" counts today, so LAST 3 DAYS = today and the 2 days before.
+DAY_PERIODS = (
+    ("today", "TODAY", 1, 0),
+    ("yesterday", "YESTERDAY", 1, 1),
+    ("3d", "LAST 3 DAYS", 3, 0),
+    ("7d", "LAST 7 DAYS", 7, 0),
+)
+
+
+def period_dates(n_days: int, ends_ago: int, now: Optional[datetime] = None) -> list[str]:
+    """The ET game dates (YYYY-MM-DD) a period covers, newest first."""
+    now = now or datetime.now(EASTERN)
+    end = now.astimezone(EASTERN) - timedelta(days=ends_ago)
+    return [(end - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(n_days)]
+
+
+@dataclass
+class PeriodStats:
+    record: tuple[int, int, float] = (0, 0, 0.0)
+    by_sport: list[tuple[str, tuple[int, int, float]]] = field(default_factory=list)
+    risk: Optional[TodayRisk] = None
+
+
+def period_risk(bets: list[dict], outcomes: dict, dates: list[str], game_date) -> TodayRisk:
+    """today_risk summed over several game dates: bet $ and still-open $."""
+    total = TodayRisk()
+    for d in dates:
+        r = today_risk(bets, outcomes, d, game_date)
+        total.staked += r.staked
+        total.open_risk += r.open_risk
+        total.n_bets += r.n_bets
+        total.n_open += r.n_open
+    return total
+
+
 @dataclass
 class AccountData:
     """Everything that only changes when a bet settles or a scan completes."""
@@ -133,7 +170,10 @@ class AccountData:
     yesterday: tuple[int, int, float] = (0, 0, 0.0)
     yesterday_by_sport: list[tuple[str, tuple[int, int, float]]] = field(default_factory=list)
     yesterday_risk: Optional[TodayRisk] = None
-    resting: Optional[RestingOrders] = None                # unfilled orders on the book
+    # The TODAY card's views, keyed by DAY_PERIODS key: today, yesterday,
+    # last 3 days, last 7 days -- all on the same definitions as `today`.
+    periods: dict[str, "PeriodStats"] = field(default_factory=dict)
+    resting:Optional[RestingOrders] = None                # unfilled orders on the book
     bet_inputs: dict[str, dict] = field(default_factory=dict)  # event_key -> inputs at placement
     error: str = ""
 
@@ -477,6 +517,14 @@ def load_account() -> AccountData:
         data.yesterday = _grade(yday_bets, outcomes)
         data.yesterday_by_sport = sport_records(yday_bets, outcomes, _grade)
         data.yesterday_risk = today_risk(bets, outcomes, yday, _game_date)
+        # Every TODAY-card view, on those same definitions.
+        for key, _title, n_days, ends_ago in DAY_PERIODS:
+            dates = period_dates(n_days, ends_ago)
+            p_bets = [b for b in bets if _game_date(b["ticker"]) in dates]
+            data.periods[key] = PeriodStats(
+                record=_grade(p_bets, outcomes),
+                by_sport=sport_records(p_bets, outcomes, _grade),
+                risk=period_risk(bets, outcomes, dates, _game_date))
     except Exception as e:
         errs.append(f"ledger: {e}")
 
@@ -1486,7 +1534,7 @@ class DashboardApp(App):
     #status { height: 1; padding: 0 2; }
     """
     BINDINGS = [("q", "quit", "Quit"), ("r", "force_refresh", "Refresh now"),
-                ("t", "toggle_day", "Today/Yesterday"),
+                ("t", "toggle_day", "Day range"),
                 ("p", "show_tab('tab_pending')", "Pending"),
                 ("s", "show_tab('tab_settled')", "Settled"),
                 ("g", "show_tab('tab_graph')", "Cum PnL"),
@@ -1506,7 +1554,7 @@ class DashboardApp(App):
         self._loop_info = LoopInfo()
         self._health = HealthData()
         self._selected: Optional[str] = None     # ticker the Model tab explains
-        self._show_yesterday = False             # TODAY card toggled to YESTERDAY
+        self._day_period = 0                     # TODAY card: index into DAY_PERIODS
         # When set, the Model tab explains this PLACED bet (event_key) instead of
         # the Signals row -- whichever table the user last moved in wins.
         self._model_bet: Optional[str] = None
@@ -1522,7 +1570,7 @@ class DashboardApp(App):
         yield Header(show_clock=True)
         with Horizontal(id="kpis"):
             yield KpiCard("ACCOUNT", "kpi_balance")
-            yield KpiCard("TODAY  (t ⇄)", "kpi_today")
+            yield KpiCard("TODAY  t ⇄", "kpi_today")
             yield KpiCard("OVERALL", "kpi_overall")
             yield KpiCard("DRAWDOWN", "kpi_drawdown")
             yield KpiCard("LAST SCAN", "kpi_scan")
@@ -1791,16 +1839,15 @@ class DashboardApp(App):
         self._set("kpi_balance", money_card(
             acct.balance, acct.cash, acct.exposed,
             compact=0 < width < MONEY_CARD_FULL_WIDTH))
-        if self._show_yesterday:
-            day = record_card(acct.yesterday, acct.yesterday_by_sport)
-            day.append("\n")
-            day.append_text(today_risk_line(acct.yesterday_risk, "yesterday"))
-            title = "YESTERDAY  (t ⇄)"
-        else:
-            day = record_card(acct.today, acct.today_by_sport)
-            day.append("\n")
-            day.append_text(today_risk_line(acct.today_risk))
-            title = "TODAY  (t ⇄)"
+        key, label, n_days, _ago = DAY_PERIODS[self._day_period]
+        period = acct.periods.get(key)
+        if period is None:                 # before the first refresh lands
+            period = PeriodStats(acct.today, acct.today_by_sport, acct.today_risk)
+        day = record_card(period.record, period.by_sport)
+        day.append("\n")
+        when = key if n_days == 1 else f"in {label.lower()}"
+        day.append_text(today_risk_line(period.risk, when))
+        title = f"{label}  t ⇄"
         self._set("kpi_today", day)
         try:
             self.query_one("#kpi_today", KpiCard).border_title = title
@@ -1993,8 +2040,8 @@ class DashboardApp(App):
         widget.refresh()
 
     def action_toggle_day(self) -> None:
-        """Flip the TODAY card between today and yesterday."""
-        self._show_yesterday = not self._show_yesterday
+        """Cycle the TODAY card: today -> yesterday -> last 3 days -> last 7 days."""
+        self._day_period = (self._day_period + 1) % len(DAY_PERIODS)
         self.render_kpis()
 
     def on_click(self, event) -> None:

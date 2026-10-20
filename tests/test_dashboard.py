@@ -26,6 +26,7 @@ from output.live_dashboard import (  # noqa: E402
     bet_eta, bet_fee, bet_side_prob, book_label, settled_bets, settled_summary, fmt_clock,
     game_key, group_recs, placed_events, profit_curves, rec_start, account_money, money_card, total_roi,
     bet_on, bet_on_cell, short_headline,
+    DAY_PERIODS, period_dates, period_risk,
 )
 from engine.account_summary import _grade          # noqa: E402
 from kalshi.normalize import position_size         # noqa: E402
@@ -771,6 +772,38 @@ class ShortHeadline(unittest.TestCase):
         for tail in (PENDING_TAIL, SETTLED_TAIL):
             width = dict(tail)["BET ON"]
             self.assertGreaterEqual(width, len("Kalshi YES"))
+
+
+class DayPeriods(unittest.TestCase):
+    """The TODAY card's four views: today, yesterday, last 3 and last 7 days."""
+
+    NOW = datetime(2026, 10, 19, 14, 0, tzinfo=timezone.utc)   # 10:00 ET
+
+    def test_order_and_titles(self):
+        self.assertEqual([p[1] for p in DAY_PERIODS],
+                         ["TODAY", "YESTERDAY", "LAST 3 DAYS", "LAST 7 DAYS"])
+
+    def test_dates_count_today(self):
+        self.assertEqual(period_dates(1, 0, self.NOW), ["2026-10-19"])
+        self.assertEqual(period_dates(1, 1, self.NOW), ["2026-10-18"])
+        self.assertEqual(period_dates(3, 0, self.NOW),
+                         ["2026-10-19", "2026-10-18", "2026-10-17"])
+        week = period_dates(7, 0, self.NOW)
+        self.assertEqual((len(week), week[-1]), (7, "2026-10-13"))
+
+    def test_dates_use_eastern_not_utc(self):
+        # 01:00 UTC on the 20th is still the 19th in Eastern.
+        late = datetime(2026, 10, 20, 1, 0, tzinfo=timezone.utc)
+        self.assertEqual(period_dates(1, 0, late), ["2026-10-19"])
+
+    def test_risk_sums_across_days(self):
+        bets = [{"ticker": "A", "wager_usd": 1.0, "side": "yes"},
+                {"ticker": "B", "wager_usd": 2.5, "side": "yes"},
+                {"ticker": "C", "wager_usd": 4.0, "side": "yes"}]
+        day_of = {"A": "2026-10-19", "B": "2026-10-17", "C": "2026-10-10"}.get
+        r = period_risk(bets, {}, period_dates(3, 0, self.NOW), day_of)
+        self.assertEqual((r.n_bets, round(r.staked, 2)), (2, 3.5))
+        self.assertEqual(round(r.open_risk, 2), 3.5)      # nothing settled yet
 
 
 if __name__ == "__main__":
